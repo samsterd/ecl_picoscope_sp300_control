@@ -1,0 +1,510 @@
+# Code base to handle connecting to the oscilloscope and running experiments
+#      Based heavily off of the code used in ultrasonicTesting project
+# Interactions with the scope will be through the picoscope class
+# Class functions:
+#   connect
+#   initialize channels
+#   program AWG
+#   run experiment / collect data
+#   functionToArbitraryWaveform (static method) : convert a python function to a buffer suitable to input to ps2000aSetSigGenArbitrary()
+#   close
+# Class variables:
+#   chandle (identifier for connection)
+
+import ctypes
+import numpy as np
+import math
+from picosdk.ps2000a import ps2000a as ps
+from picosdk.functions import adc2mV, assert_pico_ok
+from time import sleep
+
+
+class Picoscope():
+    '''
+    A class for interacting the Picoscope 2405A. Contains functions for connecting via USB, setting up the AWG, and running
+    experiments
+
+    Functions:
+        init(params : dict) : create connection by calling openPicoscope, save input params as a class variable
+        openPicoscope() : initialize USB connection to the scope, saves the chandle as a variable
+        resolveSampleInterval() : helper function that checks the values of the requested sample interval and converts it
+                                  to the SDK-required format
+        runExperiment() : sets up channels and AWG, allocates data buffers, runs streaming mode, returns data
+        initChannels() : set up the measurement and trigger channels
+        voltageIndexFromRange(voltageRange : float) : helper function to round an input voltage range to the nearest allowed value
+        initAWG() : set up the arbitrary wave generator (AWG)
+        vtDataToArbitraryWaveform() : converts vt function and time limits in experiment params into a buffer suitable to input to the AWG
+        initDataBuffers() : allocate data buffers to save data in streaming mode
+        streamingCallback(handle, numberOfSamples, startIndex, overflow, triggerAT, triggered, autoStop, pParameter) :
+            function called by streaming function after gathering data from the scope in order to copy data from buffer into memory
+        runStream() : runs streaming mode
+        closePicoscope() : closes pico connection
+    '''
+
+    def __init__(self, params: dict):
+        '''
+        Gather input parameters and constants, call openPicoscope
+
+        Args:
+            params (dict) : input parameters dict, as defined in main.py
+        Returns:
+            None
+        '''
+        self.maxDataBufferSize = 10000  # maximum number of samples each channel's buffer can hold
+        # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
+
+        # gather the required parameters from the input dict for convenience
+        # todo: make a gatherParams function that iterates through all needed keys and raises an error with all missing values
+        self.vtFunc = params['vtFunc']
+        self.vtFuncArgs = params['vtFuncArgs']
+        self.vtFuncKwargs = params['vtFuncKwargs']
+        self.vtPeriod = params['vtPeriod']
+        self.tStep = params['tStep']
+        self.experimentTime = params['experimentTime']
+        self.scopeSamples = params['scopeSamples']
+        self.channelARange = params['detectorVoltageRange0']
+        self.channelBRange = params['detectorVoltageRange1']
+        self.channelCRange = params['potentiostatVoltageRange']
+        self.targetSampleInterval = self.experimentTime / self.scopeSamples
+        self.resolveSampleInterval()
+        self.approxStreamingInterval = self.dataBufferSize * self.targetSampleInterval
+        self.params = params  # this is redundant but might be helpful for debugging
+
+        # open picoscope. this also initializes self.cHandle
+        self.openPicoscope()
+
+        # gather min/max waveform values
+        self.minBufferVal = ctypes.c_int16()
+        self.maxBufferVal = ctypes.c_int16()
+        self.minBufferSize = ctypes.c_uint32()
+        self.maxBufferSize = ctypes.c_uint32()
+        # inputs: cHandle, pointers to output the min/max buffer values and sizes
+        minMaxStatus = ps.ps2000aSigGenArbitraryMinMaxValues(self.cHandle,
+                                                             ctypes.byref(self.minBufferVal),
+                                                             ctypes.byref(self.maxBufferVal),
+                                                             ctypes.byref(self.minBufferSize),
+                                                             ctypes.byref(self.maxBufferSize))
+        assert_pico_ok(minMaxStatus)
+
+    def resolveSampleInterval(self):
+        '''
+        Helper function that determines the units of the target sample interval and provides a copy of the target interval
+        that can be re-written by ps2000aRunStreaming()
+
+        Args:
+            None. Requires self.targetInterval (float) : the target scope sampling interval determined by the input experimentTime and scopeSamples
+        Returns:
+            0. Saves self.sampleInterval and self.sampleUnits : the target interval as an uint32, the Pico constant corresponding to the target units
+        '''
+        # handle case where target interval is less than 2 ns
+        if self.targetInterval < 2e-9:
+            print(
+                "Warning: requested sample interval (experimentTime/scopeSamples) is less than the sampling limit of the "
+                "Picoscope (2 ns). A 2 ns interval will be used and number of samples will be adjusted to match experimentTime")
+            self.scopeSamples = math.floor(self.experimentTime / 2e-9)
+            self.sampleInterval = ctypes.c_uint32(2)
+            self.sampleUnits = ps.PS2000A_NS
+            return 0
+
+        unitConstants = [ps.PS2000A_S, ps.PS2000A_MS, ps.PS2000A_US, ps.PS2000A_NS]
+        unitVals = [1, 1e-3, 1e-6, 1e-9]
+
+        # find the largest unit that is below the target interval
+        valsBelowInterval = np.nonzero(unitVals <= self.targetInterval)
+        unitIndex = np.argmax(valsBelowInterval)
+        self.sampleUnits = unitConstants[unitIndex]
+
+        # convert target interval to the sample units, round to nearest int and save
+        convertedInterval = math.floor(self.targetInterval / unitVals[unitIndex])
+        self.sampleInterval = ctypes.c_uint32(convertedInterval)
+
+        return 0
+
+    def openPicoscope(self):
+        '''
+        Establishes connection to the picoscope, saves the chandle (the unique 16 bit identifier used by the PicoSDK for
+        communicating with the scope).
+
+        Args:
+            None
+        Returns:
+            None
+        '''
+
+        # create cHandle
+        self.cHandle = ctypes.c_int16()
+
+        # Open the unit with the cHandle ref. None for second argument means it will return the first scope found
+        # The outcome of the operation is recorded in cHandle
+        self.openUnit = ps.ps2000aOpenUnit(ctypes.byref(self.cHandle), None)
+
+        # Print plain explanations of errors
+        if self.cHandle == -1:
+            print("Picoscope failed to open. Check that it is plugged in and not in use by another program.")
+        elif self.cHandle == 0:
+            print("No Picoscope found. Check that it is plugged in and not in use by another program.")
+
+        # Raise errors and stop code
+        assert_pico_ok(self.openUnit)
+
+    def runStream(self):
+        '''
+        Sets up and runs a streaming experiment. Initializes channels and AWG, allocates data buffers and collects data
+        Streaming data gathering loop adapted from example script in PicoSDK.
+
+        Args: None
+        Returns: data arrays (channel A, channel B, channel C, time)
+        '''
+        # initialize channels, AWG, and data buffers
+        self.initChannels()
+        self.initAWG()
+        self.initDataBuffers()
+
+        # run stream args
+        #   handle (int16)
+        #   sampleInterval (uint32 pointer byref(self.sampleInterval)) -  target sampling interval. Will get overwritten with actual value after run
+        #   sample interval time units (constant self.sampleUnits) - calculated by init helper function
+        #   maxPreTriggerSamples (uint32 - 0)
+        #   maxPostTriggerSamples (uint32 - scopeSamples)
+        #   autoStop (int16 - 1) - stops streaming when buffer is full
+        #   downSampleRatio (uint32) - not using downsampling
+        #   downsample ratio mode (constant) - not using downsampling
+        #   overviewBufferSize (uint32) - = bufferLth passed to setDataBuffer()
+        runStreamingStatus = ps.ps2000aRunStreaming(self.cHandle, ctypes.byref(self.sampleInterval), self.sampleUnits,
+                                                    0, self.scopeSamples, 1, 0, self.dataBufferSize)
+        assert_pico_ok(runStreamingStatus)
+
+        # convert the callback function to a C function pointer
+        callbackPointer = ps.StreamingReadyType(self.streamingCallback)
+
+        # gather data in a loop
+        while self.nextSample < self.scopeSamples and not self.autoStopOuter:
+            self.wasCalledBack = False
+            getValsStatus = ps.ps2000aGetSTreamingLatestValues(self.cHandle, callbackPointer, None)
+            if not self.wasCalledBack:
+                # check back based on 10% of the approximate time to fill the buffer
+                sleep(self.approxStreamingInterval / 10)
+
+        # stop AWG and collection
+        stopStatus = ps.ps2000aStop(self.cHandle)
+        assert_pico_ok(stopStatus)
+
+        # convert data to mV
+        maxADC = ctypes.c_int16()
+        maxValStatus = ps.ps2000aMaximumValue(self.cHandle, ctypes.byref(maxADC))
+        assert_pico_ok(maxValStatus)
+
+        self.channelAData = adc2mV(self.channelARawData, self.aRange, maxADC)
+        self.channelBData = adc2mV(self.channelBRawData, self.bRange, maxADC)
+        self.channelCData = adc2mV(self.channelCRawData, self.cRange, maxADC)
+
+        # generate time data. Starts at 0 since there is no delay after trigger
+        self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval, self.scopeSamples)
+
+        return self.channelAData, self.channelBData, self.channelCData, self.time
+
+    def initChannels(self):
+        '''
+        Initializes the measurement channels and triggers on the Picoscope.
+        A - Photodetector 0
+        B - Photodetector 1
+        C - Potentiostat Out / Trigger
+
+        Args:
+            None. Requires 'experimentTime' and 'scopeSamples' parameters in experimentParameters
+        Returns:
+            None
+        '''
+        # gather voltage ranges for each channel
+        self.aRange = self.voltageIndexFromRange(self.channelARange)
+        self.bRange = self.voltageIndexFromRange(self.channelBRange)
+        self.cRange = self.voltageIndexFromRange(self.channelCRange)
+
+        # set channel args:
+        #   handle (int16)
+        #   channel (constants 0-3)
+        #   enabled (1 for enabled)
+        #   type (1 for DC)
+        #   range (calculated above)
+        #   offset (float, default to 0, may change later)
+        chAStatus = ps.ps2000aSetChannel(self.cHandle, 0, 1, 1, self.aRange, 0)
+        chBStatus = ps.ps2000aSetChannel(self.cHandle, 1, 1, 1, self.bRange, 0)
+        chCStatus = ps.ps2000aSetChannel(self.cHandle, 2, 1, 1, self.cRange, 0)
+
+        # set trigger. For now, triggering on Channel C - idea is to trigger when potentiostat starts chronoamperometry
+        # args:
+        #   handle (int16)
+        #   enable (1)
+        #   source (2 - Channel C)
+        #   threshold (int16 - will need to play with this a bit)
+        #   direction 0 (ABOVE)
+        #   delay (0 - can't use delay in streaming mode)
+        #   autoTrigger_ms (int16 - 1000s - trigger after 1 s)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 1000, 0, 0, 1000)
+
+        # error check
+        assert_pico_ok(chAStatus)
+        assert_pico_ok(chBStatus)
+        assert_pico_ok(chCStatus)
+        assert_pico_ok(triggerStatus)
+
+    @staticmethod
+    def voltageIndexFromRange(voltageRange):
+        '''
+        Helper function that rounds an input voltage range to the nearest allowed value and then converts to the corresponding
+        constants used as input to ps2000aSetChannel(). Raises an error if the input is greater than the maximum allowed
+
+        Args:
+            voltageRange (float) : the input value from experimental parameters
+        Returns:
+            constant : the constant defined in the PicoSDK corresponding to the nearest allowed value
+        '''
+
+        # voltageLimits taken from API ps2000aSetChannel() documentation, they are hard coded in the picoscope
+        voltageLimits = np.array([0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20])
+        voltageConstants = [ps.PS2000A_20MV, ps.PS2000A_50MV, ps.PS2000A_100MV, ps.PS2000A_200MV, ps.PS2000A_500MV,
+                            ps.PS2000A_1V, ps.PS2000A_2V, ps.PS2000A_5V, ps.PS2000A_10V, ps.PS2000A_20V]
+
+        # get the first voltage that is above the voltageRange input
+        limitsAboveRange = np.nonzero(voltageLimits >= voltageRange)
+        # handle case where input range is above the maximum. This should raise an error for equipment safety reasons
+        if np.count_nonzero(limitsAboveRange) == 0:
+            raise RuntimeError("Input voltage range exceeds the 20V limit. Verify the input is correct. Do not use the"
+                               "Picoscope if expecting inputs exceeding 20V.")
+        else:
+            voltageIndex = np.argmax(limitsAboveRange)
+
+        return voltageConstants[voltageIndex]
+
+    def initAWG(self):
+        '''
+        Initializes the arbitrary waveform generator (AWG)
+
+        Args:
+            None. Requires AWG parameters in the experimental params were properly filled out
+        Returns:
+            0 if successful, else -1
+        '''
+        # initialize the buffer
+        self.generateAWGBuffer()
+
+        # call setsiggenarbitrary
+        sigGenStatus = ps.ps2000aSetSigGenArbitrary(
+            self.cHandle,  # scope identifier, int16
+            0,  # offsetVoltage = 0 (int32)
+            self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
+            self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
+            self.startDeltaPhase,  # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
+            0,  # deltaPhaseIncrement = 0 (uint32) - only non-zero when sweeping
+            ps.PS2000A_MIN_DWELL_COUNT,
+            # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Not sure  if this value matters when not sweeping
+            ctypes.byref(self.waveformBuffer),
+            # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+            self.numberOfPoints,  # arbitraryWaveformSize = numberOfPoints (uint32)
+            ps.PS2000A_UP,  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
+            ps.PS2000A_ES_OFF,  # operation = PS2000A_ES_OFF (normal operation)
+            ps.PS2000A_SINGLE,
+            # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
+            ps.PS2000A_SHOT_SWEEP_TRIGGER_CONTINUOUS_RUN,
+            # shots = PS2000A_SHOT_SWEEP_TRIGGER_CONTINUOUS_RUN (run until software says stop. todo: make this an experimental param
+            0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
+            ps.PS2000A_SIGGEN_GATE_HIGH,
+            # triggerType = PS2000A_SIGGEN_GATE_HIGH (hoping this is ignored when using scope trigger)
+            ps.PS2000A_SIGGEN_SCOPE_TRIG,
+            # triggerSource = PS2000A_SIGGEN_SCOPE_TRIG (verify this means using a trigger from ps2000aSetSimpleTrigger()
+            #                   else _SOFT_TRIG maybe?
+            0  # extInThreshold = 0 (not using external trigger)
+        )
+
+        assert_pico_ok(sigGenStatus)
+
+    def generateAWGBuffer(self):
+        '''
+        Converts voltage/time function describing the voltage profile to be applied through the potentiostat into a properly
+        formatted buffer to be used as the arbitraryWaveform input to ps2000aSigGenArbitrary(). See the PicoSDK
+        documentation for further information.
+
+        Args:
+            None, requires the following params in the input params dict:
+                vtFunc (callable) : a function which outputs a voltage (in V) for an array of times input (in s)
+                vtPeriod (float) : specify the time range to generate outputs for vtFunc
+                tStep (float) : the timesteps to call vtFunc. Will get rounded to the nearest 50 ns
+                    vtPeriod and tStep specify the times uses in the AWG by np.linspace(0, vtPeriod, vtPeriod / round(tStep) + 1)
+                    Note that minArbitraryWaveformSize <= vtPeriod / round(tStep) + 1 <= maxArbitraryWaveformSize or an error
+                    will be raised
+                *funcArgs, **funcKwargs : additional args and kwargs to pass into vtFunc, if needed
+
+        Returns:
+            -1 for error, 0 for normal operation
+
+        How is the wave represented:
+            arbitraryWaveform is a buffer (array) of data, where each sample (point) is a value directly proportional to
+            the voltage to be output
+            The AWG steps through the buffer at a certain frequency and outputs the voltage based on the sample value in
+            the buffer
+            The timing is determined by several parameters describing the phase:
+                startDeltaPhase : the increment added to the phase accumulator (ie index in buffer). this + buffer size determine
+                    rate the waveform buffer is output i.e. its frequency
+                    use ps2000aSigGenFrequencyToPhase() to get the correct value of this given a specified buffer size and desired frequency
+                stopDeltaPhase, deltaPhaseIncrement, dwellCount : these parameters are only used if sweeping the waveform frequency
+                    At least initially, we only want a single frequency, so these are ignored
+                    When EIS is implemented as a test this will probably be useful
+            The voltage value is calculated from the buffer value by
+                vout = 1uV * (pkToPk / 2) * (sample_val/32767) + offsetVoltage
+                pkToPk : peak-to-peak (i.e. max - min) of the wave
+                offsetVoltage : constant added/subtracted
+                vout is always clipped to +- 2V (2e6 since in units of uV)
+
+        :param wavefunc:
+        :return:
+        '''
+        # calculate number of points implied by vtPeriod/tStep, check it is within the bounds
+        self.numberOfPoints = ctypes.c_uint32(math.floor(self.vtPeriod / self.tStep) + 1)
+        if self.numberOfPoints < self.minBufferSize:
+            print("functionToArbitraryWaveform: not enough time points specified. Inputs imply " +
+                  str(self.numberOfPoints) + " points but AWG requires " + str(self.minBufferSize) +
+                  " points. Consider lowering the value of tStep or increasing vtPeriod.")
+            return -1
+        elif self.numberOfPoints > self.maxBufferSize:
+            print("functionToArbitraryWaveform: too many time points specified. Inputs imply " +
+                  str(self.numberOfPoints) + " points but AWG requires " + str(self.maxBufferSize) +
+                  " points. Consider raising the value of tStep or decreasing vtPeriod.")
+            return -1
+
+        # calculate frequency based on vtPeriod, use to calculate startDeltaPhase
+        targetFreq = 1 / self.vtPeriod
+        self.startDeltaPhase = ctypes.c_uint32()  # value will be written by next line
+        # inputs:
+        #   chandle
+        #   frequency (double)
+        #   indexMode (built in constant)
+        #   bufferLength (uint32)
+        #   phase (output, uint32 pointer)
+        phaseStatus = ps.ps2000aSigGenFrequencyToPhase(
+            self.cHandle,
+            ctypes.c_double(targetFreq),
+            ps.PS2000A_SINGLE,  # not sure if this is properly calling the constant - it should be a uint32?
+            self.numberOfPoints,
+            ctypes.byref(self.startDeltaPhase)
+        )
+        # handle errors
+        assert_pico_ok(phaseStatus)
+
+        # create linspace of times, use to output voltages from vtFunc
+        times = np.linspace(0, self.vtPeriod, self.numberOfPoints)
+        voltages = self.vtFunc(times, *self.funcArgs, **self.funcKwargs) * 10e6  # convert to uV
+
+        # convert values to awg buffer sample values
+        # formula in SDK is vout = 1uV * (pkToPk / 2) * (sample value / 32767) + offsetVoltage
+        # assuming offset = 0 and everything is already converted to uV, we get
+        # sample value = 65534 * (vout / pkToPk)
+        self.pkToPk = ctypes.c_uint32(np.max(voltages) - np.min(voltages))  # peak-to-peak voltage, in uV
+        waveformArray = 65534 * (voltages / self.pkToPk)
+        self.waveformBuffer = waveformArray.astype(ctypes.c_int16)
+
+        return 0
+
+    def initDataBuffers(self):
+        '''
+        Allocate space for the data buffers and full data arrays that the scope will send data to, then connect those buffers to the scope
+        via ps2000aSetDataBuffer().
+
+        Streaming mode requires both a data buffer and a full data array - if the requested amount of data is larger than
+        the memory on the picoscope, it needs to be gathered and transferred in chunks to the data buffer. The data buffer
+        is copied into the full data array and then overwritten by the next chunk of data. The streaming data can become
+        discontinuous if the scope memory fills faster than the buffer can be copied to computer memory.
+
+        Args:
+            None. Requires self.scopeSamples
+        Returns:
+            None. self.dataBufferA/B/C and self.dataA/B/C are saved as class variables
+        '''
+        # determine data buffer size
+        if self.scopeSamples < self.maxDataBufferSize:
+            self.dataBufferSize = self.scopeSamples
+        else:
+            self.dataBufferSize = self.maxDataBufferSize
+            # experiment will fill more than one buffer, therefore check that there is a reasonable amount of time to execute
+            # the copy to memory step. If there isn't, print a warning
+            # todo: determine a reasonable time limit to issue this warning.
+            if self.approxStreamingInterval < 0.001:
+                print("Warning: requested sampling speed may result in discontinuous sampling due to memory speed" +
+                      " bottlenecks. Double check results and consider reducing scopeSamples. ")
+
+        # allocate data arrays
+        self.channelARawData = np.zeros(self.scopeSamples, dtype=np.int16)
+        self.channelBRawData = np.zeros(self.scopeSamples, dtype=np.int16)
+        self.channelCRawData = np.zeros(self.scopeSamples, dtype=np.int16)
+
+        # allocate streaming buffers
+        self.channelABuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
+        self.channelBBuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
+        self.channelCBuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
+
+        # initialize trackers that will be used by the callback function to copy data from buffers to proper location in data arrays
+        # these are based on the streaming example in the picosdk github
+        self.nextSample = 0
+        self.autoStopOuter = False
+        self.wasCalledBack = False
+
+        # set data buffer (points the scope to the allocated buffers for fast saving)
+        # args:
+        #   chandle (int16)
+        #   channel (0-2 - each channel needs its own data buffer)
+        #   buffer (pointer to array of int16) - location of data
+        #   bufferLth (int32) - length of buffer arrays (i.e. self.scopeSamples)
+        #   segmentIndex (uint32) - not used in streaming mode
+        #   mode (constant) - used for downsampling
+        bufferAStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
+                                                self.dataBufferSize, 0, 0)
+        bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelBBuffer),
+                                                self.dataBufferSize, 0, 0)
+        bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelCBuffer),
+                                                self.dataBufferSize, 0, 0)
+
+        # error checking
+        assert_pico_ok(bufferAStatus)
+        assert_pico_ok(bufferBStatus)
+        assert_pico_ok(bufferCStatus)
+
+    def streamingCallback(self, handle, numberOfSamples, startIndex, overflow, triggerAT, triggered, autoStop,
+                          pParameter):
+        '''
+        Function that is called by ps2000aGetStreamingLatestValues every time it returns in order to move data from the
+        streaming buffer into memory. Adapted from example code in PicoSDK
+
+        PROBLEM: this needs to be turned into a pointer and fed into ps.StreamingReadyType. The arguments are dictated by
+        the SDK. This means it probably can't use self as an argument, so can't access class variables
+        Need to access self.channelData vars, would strongly prefer not making those globals
+        Ugly possible solution: move initBuffers into runStream function? then variables are accessible?
+        In the example, the streaming_callback function uses variables not defined in the function -
+            doesn't raise errors at start because they are globals, but it is promising?
+        If this doesn't work, will need to make buffers and arrays globals (and then erase when done?)
+        For now: implementing as a class function. I'll see if that fails before implementing everything as globals
+
+        Args:
+            None. Requires that data arrays and buffers were properly set up
+        Returns:
+            None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
+        '''
+        self.wasCalledBack = True
+        destEnd = self.nextSample + numberOfSamples
+        sourceEnd = startIndex + numberOfSamples
+        self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
+        self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
+        self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
+        self.nextSample += numberOfSamples
+        if autoStop:
+            self.autoStopOuter = True
+
+    def closePicoscope(self):
+        '''
+        Closes connection to Picoscope.
+
+        Args:
+            None. Requires self.cHandle
+        Returns:
+            None. Error is raised if close operation is not successful
+        '''
+        closeStatus = ps.ps2000aCloseUnit(self.cHandle)
+        assert_pico_ok(closeStatus)
