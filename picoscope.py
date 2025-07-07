@@ -185,7 +185,6 @@ class Picoscope():
         # gather data in a loop
         while self.nextSample < self.scopeSamples and not self.autoStopOuter:
             self.wasCalledBack = False
-            # print('looping...')
             getValsStatus = ps.ps2000aGetStreamingLatestValues(self.cHandle, callbackPointer, None)
             if not self.wasCalledBack:
                 # check back based on 10% of the approximate time to fill the buffer
@@ -248,7 +247,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (0 - can't use delay in streaming mode)
         #   autoTrigger_ms (int16 - 1000s - trigger after 1 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 100, 0, 0, 100)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 10, 0, 0, 1)
 
         # error check
         assert_pico_ok(chAStatus)
@@ -308,7 +307,6 @@ class Picoscope():
             self.awgShots = rawShots
             self.awgTime = self.awgShots * self.vtPeriod
 
-        print(self.startDeltaPhase)
         # call setsiggenarbitrary
         sigGenStatus = ps.ps2000aSetSigGenArbitrary(
             self.cHandle,  # scope identifier, int16
@@ -327,32 +325,11 @@ class Picoscope():
                                         # setting to max 0xFFFFFFFF runs continuously
             0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
             ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
-            ctypes.c_int32(1),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
+            ctypes.c_int32(0),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
             #                   else _SOFT_TRIG maybe?
             1  # extInThreshold = 0 (not using external trigger)
         )
 
-        # # testing with built in
-        # # waveType = ctypes.c_int16(1) = PS2000A_SQUARE
-        # # startFrequency = 10 kHz
-        # # stopFrequency = 100 kHz
-        # # increment = 5 kHz
-        # # dwellTime = 1
-        # # sweepType = ctypes.c_int16(1) = PS2000A_UP
-        # # operation = 0
-        # # shots = 0
-        # # sweeps = 0
-        # # triggerType = ctypes.c_int16(0) = PS2000A_SIGGEN_RISING
-        # # triggerSource = ctypes.c_int16(0) = PS2000A_SIGGEN_NONE
-        # # extInThreshold = 1
-        # wavetype = ctypes.c_int16(1)
-        # sweepType = ctypes.c_int32(2)
-        # triggertype = ctypes.c_int32(0)
-        # triggerSource = ctypes.c_int32(0)
-        #
-        # sigGenStatus= ps.ps2000aSetSigGenBuiltIn(self.cHandle, 0, 2000000, wavetype, 1, 10, 1, 1,
-        #                                                         sweepType, 0, 0, 0, triggertype, triggerSource, 1)
-        #
         assert_pico_ok(sigGenStatus)
 
     def generateAWGBuffer(self):
@@ -534,14 +511,10 @@ class Picoscope():
         Returns:
             None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
         '''
-        # print(startIndex)
-        # print(numberOfSamples)
-        # print(triggered)
+
         self.wasCalledBack = True
         destEnd = self.nextSample + numberOfSamples
         sourceEnd = startIndex + numberOfSamples
-        # print(destEnd)
-        # print(sourceEnd)
         self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
         self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
         self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
