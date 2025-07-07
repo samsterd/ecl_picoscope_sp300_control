@@ -11,12 +11,18 @@
 # Class variables:
 #   chandle (identifier for connection)
 
+# todo: we are running without errors, but not producing data on the channels. need to investigate what is actually coming out
+#       possible culprits: streaming callback function, triggering
+#   first problem: scope triggering is not going to run - it is circular right now?
+#       But the auto trigger should be running?
+
 import ctypes
 import numpy as np
 import math
 from picosdk.ps2000a import ps2000a as ps
 from picosdk.functions import adc2mV, assert_pico_ok
 from time import sleep
+from matplotlib import pyplot as plt
 
 
 class Picoscope():
@@ -65,9 +71,8 @@ class Picoscope():
         self.channelARange = params['detectorVoltageRange0']
         self.channelBRange = params['detectorVoltageRange1']
         self.channelCRange = params['potentiostatVoltageRange']
-        self.targetSampleInterval = self.experimentTime / self.scopeSamples
+        self.targetInterval = self.experimentTime / self.scopeSamples
         self.resolveSampleInterval()
-        self.approxStreamingInterval = self.dataBufferSize * self.targetSampleInterval
         self.params = params  # this is redundant but might be helpful for debugging
 
         # open picoscope. this also initializes self.cHandle
@@ -103,15 +108,15 @@ class Picoscope():
                 "Picoscope (2 ns). A 2 ns interval will be used and number of samples will be adjusted to match experimentTime")
             self.scopeSamples = math.floor(self.experimentTime / 2e-9)
             self.sampleInterval = ctypes.c_uint32(2)
-            self.sampleUnits = ps.PS2000A_NS
+            self.sampleUnits = ps.PS2000A_TIME_UNITS['PS2000A_NS']
             return 0
 
-        unitConstants = [ps.PS2000A_S, ps.PS2000A_MS, ps.PS2000A_US, ps.PS2000A_NS]
-        unitVals = [1, 1e-3, 1e-6, 1e-9]
+        unitConstants = [ps.PS2000A_TIME_UNITS['PS2000A_S'], ps.PS2000A_TIME_UNITS['PS2000A_MS'], ps.PS2000A_TIME_UNITS['PS2000A_US'], ps.PS2000A_TIME_UNITS['PS2000A_NS']]
+        unitVals = np.array([1, 1e-3, 1e-6, 1e-9])
 
         # find the largest unit that is below the target interval
-        valsBelowInterval = np.nonzero(unitVals <= self.targetInterval)
-        unitIndex = np.argmax(valsBelowInterval)
+        # error handling done in previous step, array cannot be empty since targetInverval >= 2e-9
+        unitIndex = np.argmax(unitVals <= self.targetInterval)
         self.sampleUnits = unitConstants[unitIndex]
 
         # convert target interval to the sample units, round to nearest int and save
@@ -157,8 +162,8 @@ class Picoscope():
         '''
         # initialize channels, AWG, and data buffers
         self.initChannels()
-        self.initAWG()
         self.initDataBuffers()
+        self.initAWG()
 
         # run stream args
         #   handle (int16)
@@ -171,7 +176,7 @@ class Picoscope():
         #   downsample ratio mode (constant) - not using downsampling
         #   overviewBufferSize (uint32) - = bufferLth passed to setDataBuffer()
         runStreamingStatus = ps.ps2000aRunStreaming(self.cHandle, ctypes.byref(self.sampleInterval), self.sampleUnits,
-                                                    0, self.scopeSamples, 1, 0, self.dataBufferSize)
+                                                    0, self.scopeSamples, 1, 1, 0, self.dataBufferSize)
         assert_pico_ok(runStreamingStatus)
 
         # convert the callback function to a C function pointer
@@ -180,7 +185,8 @@ class Picoscope():
         # gather data in a loop
         while self.nextSample < self.scopeSamples and not self.autoStopOuter:
             self.wasCalledBack = False
-            getValsStatus = ps.ps2000aGetSTreamingLatestValues(self.cHandle, callbackPointer, None)
+            # print('looping...')
+            getValsStatus = ps.ps2000aGetStreamingLatestValues(self.cHandle, callbackPointer, None)
             if not self.wasCalledBack:
                 # check back based on 10% of the approximate time to fill the buffer
                 sleep(self.approxStreamingInterval / 10)
@@ -194,12 +200,14 @@ class Picoscope():
         maxValStatus = ps.ps2000aMaximumValue(self.cHandle, ctypes.byref(maxADC))
         assert_pico_ok(maxValStatus)
 
-        self.channelAData = adc2mV(self.channelARawData, self.aRange, maxADC)
-        self.channelBData = adc2mV(self.channelBRawData, self.bRange, maxADC)
-        self.channelCData = adc2mV(self.channelCRawData, self.cRange, maxADC)
+        # note that the raw data are 16-bit ints. They need to be converted to 32- or 64- bit to avoid overflows
+        self.channelAData = adc2mV(self.channelARawData.astype(np.int_), self.aRange, maxADC)
+        self.channelBData = adc2mV(self.channelBRawData.astype(np.int_), self.bRange, maxADC)
+        self.channelCData = adc2mV(self.channelCRawData.astype(np.int_), self.cRange, maxADC)
 
         # generate time data. Starts at 0 since there is no delay after trigger
-        self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval, self.scopeSamples)
+        # self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval.value, self.scopeSamples)
+        self.time = np.linspace(0, self.experimentTime, self.scopeSamples)
 
         return self.channelAData, self.channelBData, self.channelCData, self.time
 
@@ -240,7 +248,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (0 - can't use delay in streaming mode)
         #   autoTrigger_ms (int16 - 1000s - trigger after 1 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 1000, 0, 0, 1000)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 100, 0, 0, 100)
 
         # error check
         assert_pico_ok(chAStatus)
@@ -262,17 +270,17 @@ class Picoscope():
 
         # voltageLimits taken from API ps2000aSetChannel() documentation, they are hard coded in the picoscope
         voltageLimits = np.array([0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20])
-        voltageConstants = [ps.PS2000A_20MV, ps.PS2000A_50MV, ps.PS2000A_100MV, ps.PS2000A_200MV, ps.PS2000A_500MV,
-                            ps.PS2000A_1V, ps.PS2000A_2V, ps.PS2000A_5V, ps.PS2000A_10V, ps.PS2000A_20V]
+        voltageConstants = [ps.PS2000A_RANGE['PS2000A_20MV'], ps.PS2000A_RANGE['PS2000A_50MV'], ps.PS2000A_RANGE['PS2000A_100MV'],
+                            ps.PS2000A_RANGE['PS2000A_200MV'], ps.PS2000A_RANGE['PS2000A_500MV'],
+                            ps.PS2000A_RANGE['PS2000A_1V'], ps.PS2000A_RANGE['PS2000A_2V'], ps.PS2000A_RANGE['PS2000A_5V'],
+                            ps.PS2000A_RANGE['PS2000A_10V'], ps.PS2000A_RANGE['PS2000A_20V']]
 
         # get the first voltage that is above the voltageRange input
-        limitsAboveRange = np.nonzero(voltageLimits >= voltageRange)
-        # handle case where input range is above the maximum. This should raise an error for equipment safety reasons
-        if np.count_nonzero(limitsAboveRange) == 0:
-            raise RuntimeError("Input voltage range exceeds the 20V limit. Verify the input is correct. Do not use the"
+        try:
+            voltageIndex = np.argmax(voltageLimits >= voltageRange)
+        except ValueError:
+            raise ValueError("Input voltage range exceeds the 20V limit. Verify the input is correct. Do not use the"
                                "Picoscope if expecting inputs exceeding 20V.")
-        else:
-            voltageIndex = np.argmax(limitsAboveRange)
 
         return voltageConstants[voltageIndex]
 
@@ -288,34 +296,63 @@ class Picoscope():
         # initialize the buffer
         self.generateAWGBuffer()
 
+        # calculate the number of shots needed to run for vtPeriod time. Print a warning if the amount exceeds 2e32-1
+        rawShots = math.floor(self.experimentTime / self.vtPeriod)
+        if rawShots > 2e32-1:
+            self.awgShots = 2e32-1
+            self.awgTime = self.awgShots.value * self.vtPeriod
+            print("AWG Warning: number of voltage function periods implied by vtPeriod and experimentTime settings exceeds " +
+                  "the amount possible using the AWG (2e32-1). Experiment will proceed using maximum allowed value, which " +
+                  "will run for " + str(self.awgTime) + " seconds.")
+        else:
+            self.awgShots = rawShots
+            self.awgTime = self.awgShots * self.vtPeriod
+
+        print(self.startDeltaPhase)
         # call setsiggenarbitrary
         sigGenStatus = ps.ps2000aSetSigGenArbitrary(
             self.cHandle,  # scope identifier, int16
-            0,  # offsetVoltage = 0 (int32)
+            self.awgOffset,  # offsetVoltage = 0 (int32)
             self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
             self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
             self.startDeltaPhase,  # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
             0,  # deltaPhaseIncrement = 0 (uint32) - only non-zero when sweeping
-            ps.PS2000A_MIN_DWELL_COUNT,
-            # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Not sure  if this value matters when not sweeping
-            ctypes.byref(self.waveformBuffer),
-            # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
-            self.numberOfPoints,  # arbitraryWaveformSize = numberOfPoints (uint32)
-            ps.PS2000A_UP,  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
-            ps.PS2000A_ES_OFF,  # operation = PS2000A_ES_OFF (normal operation)
-            ps.PS2000A_SINGLE,
-            # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
-            ps.PS2000A_SHOT_SWEEP_TRIGGER_CONTINUOUS_RUN,
-            # shots = PS2000A_SHOT_SWEEP_TRIGGER_CONTINUOUS_RUN (run until software says stop. todo: make this an experimental param
+            3,  # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
+            ctypes.byref(self.waveformBuffer),  # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+            ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
+            ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
+            0, #   # operation = PS2000A_ES_OFF (normal operation)
+            0,  # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
+            ctypes.c_uint32(0xFFFFFFFF),# ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+                                        # setting to max 0xFFFFFFFF runs continuously
             0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
-            ps.PS2000A_SIGGEN_GATE_HIGH,
-            # triggerType = PS2000A_SIGGEN_GATE_HIGH (hoping this is ignored when using scope trigger)
-            ps.PS2000A_SIGGEN_SCOPE_TRIG,
-            # triggerSource = PS2000A_SIGGEN_SCOPE_TRIG (verify this means using a trigger from ps2000aSetSimpleTrigger()
+            ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
+            ctypes.c_int32(1),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
             #                   else _SOFT_TRIG maybe?
-            0  # extInThreshold = 0 (not using external trigger)
+            1  # extInThreshold = 0 (not using external trigger)
         )
 
+        # # testing with built in
+        # # waveType = ctypes.c_int16(1) = PS2000A_SQUARE
+        # # startFrequency = 10 kHz
+        # # stopFrequency = 100 kHz
+        # # increment = 5 kHz
+        # # dwellTime = 1
+        # # sweepType = ctypes.c_int16(1) = PS2000A_UP
+        # # operation = 0
+        # # shots = 0
+        # # sweeps = 0
+        # # triggerType = ctypes.c_int16(0) = PS2000A_SIGGEN_RISING
+        # # triggerSource = ctypes.c_int16(0) = PS2000A_SIGGEN_NONE
+        # # extInThreshold = 1
+        # wavetype = ctypes.c_int16(1)
+        # sweepType = ctypes.c_int32(2)
+        # triggertype = ctypes.c_int32(0)
+        # triggerSource = ctypes.c_int32(0)
+        #
+        # sigGenStatus= ps.ps2000aSetSigGenBuiltIn(self.cHandle, 0, 2000000, wavetype, 1, 10, 1, 1,
+        #                                                         sweepType, 0, 0, 0, triggertype, triggerSource, 1)
+        #
         assert_pico_ok(sigGenStatus)
 
     def generateAWGBuffer(self):
@@ -359,21 +396,23 @@ class Picoscope():
         :return:
         '''
         # calculate number of points implied by vtPeriod/tStep, check it is within the bounds
-        self.numberOfPoints = ctypes.c_uint32(math.floor(self.vtPeriod / self.tStep) + 1)
-        if self.numberOfPoints < self.minBufferSize:
+        self.numberOfPoints = math.floor(self.vtPeriod / self.tStep) # this isn't saved as a proper Ctype because it needs
+                                                                     # to be signed or unsigned depending on the function using it :(
+        if self.numberOfPoints < self.minBufferSize.value:
             print("functionToArbitraryWaveform: not enough time points specified. Inputs imply " +
                   str(self.numberOfPoints) + " points but AWG requires " + str(self.minBufferSize) +
                   " points. Consider lowering the value of tStep or increasing vtPeriod.")
             return -1
-        elif self.numberOfPoints > self.maxBufferSize:
+        elif self.numberOfPoints > self.maxBufferSize.value:
             print("functionToArbitraryWaveform: too many time points specified. Inputs imply " +
-                  str(self.numberOfPoints) + " points but AWG requires " + str(self.maxBufferSize) +
+                  str(self.numberOfPoints) + " points but AWG has a maximum of " + str(self.maxBufferSize.value) +
                   " points. Consider raising the value of tStep or decreasing vtPeriod.")
             return -1
 
         # calculate frequency based on vtPeriod, use to calculate startDeltaPhase
-        targetFreq = 1 / self.vtPeriod
+        targetFreq = (1 / self.vtPeriod)
         self.startDeltaPhase = ctypes.c_uint32()  # value will be written by next line
+
         # inputs:
         #   chandle
         #   frequency (double)
@@ -383,24 +422,30 @@ class Picoscope():
         phaseStatus = ps.ps2000aSigGenFrequencyToPhase(
             self.cHandle,
             ctypes.c_double(targetFreq),
-            ps.PS2000A_SINGLE,  # not sure if this is properly calling the constant - it should be a uint32?
-            self.numberOfPoints,
+            0, # INDEX_MODE = SINGLE
+            ctypes.c_uint32(self.numberOfPoints),
             ctypes.byref(self.startDeltaPhase)
         )
+
         # handle errors
         assert_pico_ok(phaseStatus)
 
         # create linspace of times, use to output voltages from vtFunc
         times = np.linspace(0, self.vtPeriod, self.numberOfPoints)
-        voltages = self.vtFunc(times, *self.funcArgs, **self.funcKwargs) * 10e6  # convert to uV
+        voltages = self.vtFunc(times, *self.vtFuncArgs, **self.vtFuncKwargs) * 1e6  # convert to uV
 
         # convert values to awg buffer sample values
         # formula in SDK is vout = 1uV * (pkToPk / 2) * (sample value / 32767) + offsetVoltage
-        # assuming offset = 0 and everything is already converted to uV, we get
-        # sample value = 65534 * (vout / pkToPk)
-        self.pkToPk = ctypes.c_uint32(np.max(voltages) - np.min(voltages))  # peak-to-peak voltage, in uV
-        waveformArray = 65534 * (voltages / self.pkToPk)
-        self.waveformBuffer = waveformArray.astype(ctypes.c_int16)
+        #   This scales the Vout values to the peak-to-peak value and divides into a 16-bit int (32767 = 2e15-1, one bit is sign)
+        # We will set the offset to be max + min / 2 so that the waveform is optimally positioned in the middle of the range
+        # sample value = (65534 * (vout - offset)) /  pkToPk
+        self.pkToPk = ctypes.c_uint32(math.floor(np.max(voltages) - np.min(voltages)))  # peak-to-peak voltage rounded to nearest uV
+        self.awgOffset = ctypes.c_int32(math.floor((np.max(voltages) + np.min(voltages))/2))
+
+        #todo: revisit this, make sure output voltage is correct. removed a factor of 2 to prevent overflow, but I can't justify why it works
+        # is max-min not the same as peak-to-peak when we don't have the full wave? it doesn't make sense that that makes the scaling break
+        waveformArray = np.array((65534 * (voltages  - self.awgOffset.value)) / self.pkToPk.value, dtype = ctypes.c_int16)
+        self.waveformBuffer = np.ctypeslib.as_ctypes(waveformArray)
 
         return 0
 
@@ -422,8 +467,10 @@ class Picoscope():
         # determine data buffer size
         if self.scopeSamples < self.maxDataBufferSize:
             self.dataBufferSize = self.scopeSamples
+            self.approxStreamingInterval = self.dataBufferSize * self.targetInterval
         else:
             self.dataBufferSize = self.maxDataBufferSize
+            self.approxStreamingInterval = self.dataBufferSize * self.targetInterval
             # experiment will fill more than one buffer, therefore check that there is a reasonable amount of time to execute
             # the copy to memory step. If there isn't, print a warning
             # todo: determine a reasonable time limit to issue this warning.
@@ -432,14 +479,14 @@ class Picoscope():
                       " bottlenecks. Double check results and consider reducing scopeSamples. ")
 
         # allocate data arrays
-        self.channelARawData = np.zeros(self.scopeSamples, dtype=np.int16)
-        self.channelBRawData = np.zeros(self.scopeSamples, dtype=np.int16)
-        self.channelCRawData = np.zeros(self.scopeSamples, dtype=np.int16)
+        self.channelARawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
+        self.channelBRawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
+        self.channelCRawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
 
         # allocate streaming buffers
-        self.channelABuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
-        self.channelBBuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
-        self.channelCBuffer = np.zeros(self.dataBufferSize, dtype=np.int16)
+        self.channelABuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        self.channelBBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        self.channelCBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
 
         # initialize trackers that will be used by the callback function to copy data from buffers to proper location in data arrays
         # these are based on the streaming example in the picosdk github
@@ -457,9 +504,9 @@ class Picoscope():
         #   mode (constant) - used for downsampling
         bufferAStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
                                                 self.dataBufferSize, 0, 0)
-        bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelBBuffer),
+        bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
                                                 self.dataBufferSize, 0, 0)
-        bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelCBuffer),
+        bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
                                                 self.dataBufferSize, 0, 0)
 
         # error checking
@@ -487,9 +534,14 @@ class Picoscope():
         Returns:
             None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
         '''
+        # print(startIndex)
+        # print(numberOfSamples)
+        # print(triggered)
         self.wasCalledBack = True
         destEnd = self.nextSample + numberOfSamples
         sourceEnd = startIndex + numberOfSamples
+        # print(destEnd)
+        # print(sourceEnd)
         self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
         self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
         self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
