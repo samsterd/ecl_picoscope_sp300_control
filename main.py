@@ -44,6 +44,10 @@ experimentParameters = {
                                     # Allowed values are 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20
                                     # Improper inputs will be rounded up to the nearest allowed value
     #todo: add voltage offsets? Might be useful for the photodetectors
+
+    # potentiostat parameters
+    'experimentType' : 'ocv', # str - 'ocv' or 'ca' for open circuit voltage or chronoamperometry
+    'potentiostatChannel' : 1 # int - 1 or 2, channel on used on potentiostat
 }
 
 def runExperiment(params : dict):

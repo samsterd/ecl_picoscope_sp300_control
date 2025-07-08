@@ -15,6 +15,7 @@
 #       possible culprits: streaming callback function, triggering
 #   first problem: scope triggering is not going to run - it is circular right now?
 #       But the auto trigger should be running?
+# todo: add trigger on channel D - will use the biologic trigger out function
 
 import ctypes
 import numpy as np
