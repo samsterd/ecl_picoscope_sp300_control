@@ -272,20 +272,21 @@ class Biologic:
                     "numberOfSteps" : ECC_parm("Step_number", int),
                     "dt" : ECC_parm("Record_every_dT", float),
                     "di" : ECC_parm("Record_every_dI", float),
-                    "numberOfCycles" : ECC_parm("N_Cycles", float),
+                    "numberOfCycles" : ECC_parm("N_Cycles", int),
                     "iRange" : ECC_parm("I_Range", int)
                 }
 
                 # create ecc_parms from inputs. this can probably be turned into a more efficient function later
-                pNumberOfSteps = make_ecc_parm(self.api, ca_parms['numberOfSteps'], self.numberOfSteps)
+                pNumberOfSteps = make_ecc_parm(self.api, ca_parms['numberOfSteps'], self.numberOfSteps - 1) # the input parameter is 0-indexed
                 pdt = make_ecc_parm(self.api, ca_parms['dt'], self.dt)
                 pNumberOfCycles = make_ecc_parm(self.api, ca_parms['numberOfCycles'], self.numberOfCycles)
                 piRange = make_ecc_parm(self.api, ca_parms['iRange'], self.currentRange)
                 pSteps = []
                 for i, step in enumerate(stepParm):
                     pSteps.append(make_ecc_parm(self.api, ca_parms['vStep'], step.voltage, i))
-                    pSteps.append(make_ecc_parm(self.api, ca_parms['vStepTime', step.duration, i]))
-                    pSteps.append(make_ecc_parm(self.api, ca_parms['vs_init'], step.vsINit, i))
+                    pSteps.append(make_ecc_parm(self.api, ca_parms['vStepTime'], step.duration, i))
+                    pSteps.append(make_ecc_parm(self.api, ca_parms['vsInit'], step.vsInit, i))
+
                 # todo: add 'xctr' parm for ext input
 
                 eccParms = make_ecc_parms(self.api, *pSteps, pNumberOfSteps, pdt, pNumberOfCycles, piRange, pxctr, praux2)
@@ -336,9 +337,73 @@ class Biologic:
             time.sleep(1)
 
         # convert data into a more useable format
+        # todo: get_experiment_data only returns nicely formatted things for 'ocv' and 'cp'
+        #   that said, we can probably dump it b/c we want the data on the scope anyway + we can't run this control loop while
+        #       also running scope streaming without a lot of annoyance developing a parallel algorithm
         self.data = self.processData(dataDictList)
         return self.data
 
+    def runExperimentWithoutData(self):
+        '''
+        Runs experiment without a control loop. This will result in only the first ~1000 data points being recovered
+        due to the potentiostat memory filling
+
+        :return:
+        '''
+        self.api.StartChannel(self.id, self.channel)
+
+    def gatherData(self):
+        '''
+        Gathers data after experiment has been run and formats it
+        The potentiostat only has room for ~1000 data points, so this will not gather everything efficiently
+
+        :return:
+        '''
+        dataBuffer = self.api.GetData(self.id, self.channel)
+
+        status, techName = get_info_data(self.api, dataBuffer)
+
+        # unload data from buffer as a generator of data rows
+        bufferGenerator = get_experiment_data(self.api, dataBuffer, techName, self.board_type)
+        # be careful about generating list of rows for large data sets
+        bufferDictList = [d for d in bufferGenerator]
+
+        if self.experiment == 'ocv':
+
+            self.data = self.processData(bufferDictList)
+            return self.data
+
+        elif self.experiment == 'ca':
+
+            # bufferDictList is raw, unlabeled data. Need to format it nicely
+            rows = len(bufferDictList)
+            cols = len(bufferDictList[0])
+
+            # gather some info for data conversion
+            timebase = dataBuffer[0].TimeBase
+
+            # initialize data dict
+            self.data = {'t' : np.empty(rows),
+                    'Ewe' : np.empty(rows),
+                    'Iwe' : np.empty(rows),
+                    'cycle' : np.empty(rows)}
+
+            # iterate through bufferDictList and populate data dict
+            for i in range(rows):
+
+                # the rows are strings of hex numbers for some ungodly reason and so must be converted to usable numbers
+                rowStrs = bufferDictList[i]
+                row = [int(d, 16) for d in rowStrs]
+
+                # convert time data based on 'CP' branch of get_experiment_data
+                tHigh, tLow = row[0], row[1]
+                tRel = (tHigh << 32) + tLow
+                self.data['t'][i] = tRel * timebase
+                self.data['Ewe'][i] = self.api.ConvertChannelNumericIntoSingle(row[2], self.board_type)
+                self.data['Iwe'][i] = self.api.ConvertChannelNumericIntoSingle(row[3], self.board_type)
+                self.data['cycle'][i] = row[4]
+
+            return self.data
 
     def processData(self, listOfDicts):
         '''
