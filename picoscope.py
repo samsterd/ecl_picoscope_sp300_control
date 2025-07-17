@@ -72,6 +72,7 @@ class Picoscope():
         self.channelARange = params['detectorVoltageRange0']
         self.channelBRange = params['detectorVoltageRange1']
         self.channelCRange = params['potentiostatVoltageRange']
+        self.channelDRange = 20 # hardcoding trigger channel range to max
         self.targetInterval = self.experimentTime / self.scopeSamples
         self.resolveSampleInterval()
         self.params = params  # this is redundant but might be helpful for debugging
@@ -153,13 +154,13 @@ class Picoscope():
         # Raise errors and stop code
         assert_pico_ok(self.openUnit)
 
-    def runStream(self):
+    def initStream(self):
         '''
-        Sets up and runs a streaming experiment. Initializes channels and AWG, allocates data buffers and collects data
-        Streaming data gathering loop adapted from example script in PicoSDK.
+        Sets up and runs stream but does not start data collection loop.
+        Initializes channels and AWG, allocates data buffers, calls ps2000aRunStreaming
 
         Args: None
-        Returns: data arrays (channel A, channel B, channel C, time)
+        Returns: None
         '''
         # initialize channels, AWG, and data buffers
         self.initChannels()
@@ -179,6 +180,17 @@ class Picoscope():
         runStreamingStatus = ps.ps2000aRunStreaming(self.cHandle, ctypes.byref(self.sampleInterval), self.sampleUnits,
                                                     0, self.scopeSamples, 1, 1, 0, self.dataBufferSize)
         assert_pico_ok(runStreamingStatus)
+
+
+    def runStream(self):
+        '''
+        Collects data from an ongoing streaming experiment.
+        Streaming data gathering loop adapted from example script in PicoSDK.
+
+        Args: None (initStream must have been called beforehand)
+        Returns: data arrays (channel A, channel B, channel C, channel D, time)
+        '''
+        #todo: write checks that initStream was called
 
         # convert the callback function to a C function pointer
         callbackPointer = ps.StreamingReadyType(self.streamingCallback)
@@ -201,15 +213,16 @@ class Picoscope():
         assert_pico_ok(maxValStatus)
 
         # note that the raw data are 16-bit ints. They need to be converted to 32- or 64- bit to avoid overflows
-        self.channelAData = adc2mV(self.channelARawData.astype(np.int_), self.aRange, maxADC)
-        self.channelBData = adc2mV(self.channelBRawData.astype(np.int_), self.bRange, maxADC)
-        self.channelCData = adc2mV(self.channelCRawData.astype(np.int_), self.cRange, maxADC)
+        self.channelAData = np.array(adc2mV(self.channelARawData.astype(np.int_), self.aRange, maxADC))
+        self.channelBData = np.array(adc2mV(self.channelBRawData.astype(np.int_), self.bRange, maxADC))
+        self.channelCData = np.array(adc2mV(self.channelCRawData.astype(np.int_), self.cRange, maxADC))
+        self.channelDData = np.array(self.channelDRawData.astype(np.int_)) # we want the channel D data in raw ADC to judge the triggering set point
 
         # generate time data. Starts at 0 since there is no delay after trigger
         # self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval.value, self.scopeSamples)
         self.time = np.linspace(0, self.experimentTime, self.scopeSamples)
 
-        return self.channelAData, self.channelBData, self.channelCData, self.time
+        return self.channelAData, self.channelBData, self.channelCData, self.channelDData, self.time
 
     def initChannels(self):
         '''
@@ -227,6 +240,7 @@ class Picoscope():
         self.aRange = self.voltageIndexFromRange(self.channelARange)
         self.bRange = self.voltageIndexFromRange(self.channelBRange)
         self.cRange = self.voltageIndexFromRange(self.channelCRange)
+        self.dRange = self.voltageIndexFromRange(self.channelDRange)
 
         # set channel args:
         #   handle (int16)
@@ -238,22 +252,24 @@ class Picoscope():
         chAStatus = ps.ps2000aSetChannel(self.cHandle, 0, 1, 1, self.aRange, 0)
         chBStatus = ps.ps2000aSetChannel(self.cHandle, 1, 1, 1, self.bRange, 0)
         chCStatus = ps.ps2000aSetChannel(self.cHandle, 2, 1, 1, self.cRange, 0)
+        chDStatus = ps.ps2000aSetChannel(self.cHandle, 3, 1, 1, self.dRange, 0)
 
-        # set trigger. For now, triggering on Channel C - idea is to trigger when potentiostat starts chronoamperometry
+        # set trigger. For now, triggering on Channel D - idea is to trigger when potentiostat starts chronoamperometry
         # args:
         #   handle (int16)
         #   enable (1)
-        #   source (2 - Channel C)
+        #   source (3 - Channel D)
         #   threshold (int16 - will need to play with this a bit)
         #   direction 0 (ABOVE)
         #   delay (0 - can't use delay in streaming mode)
-        #   autoTrigger_ms (int16 - 1000s - trigger after 1 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 2, 10, 0, 0, 1)
+        #   autoTrigger_ms (int16 - 10000s - trigger after 10 s)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 10000)
 
         # error check
         assert_pico_ok(chAStatus)
         assert_pico_ok(chBStatus)
         assert_pico_ok(chCStatus)
+        assert_pico_ok(chDStatus)
         assert_pico_ok(triggerStatus)
 
     @staticmethod
@@ -283,6 +299,24 @@ class Picoscope():
                                "Picoscope if expecting inputs exceeding 20V.")
 
         return voltageConstants[voltageIndex]
+
+    @staticmethod
+    def voltageToPotentiostatCurrent(voltageArray, currentRange):
+        '''
+        Help function to convert the I_Monitor data from the Biologic (in mV) into current based on the current range of the
+        potentiostat
+
+        Args:
+            voltageArray (array) : array of voltages (measured from Channel C in a typical experiment) (mV)
+            currentRange (int) : the current range of the Biologic, an int from 0 to 9
+
+        Returns:
+            array (currents) : an array of current values, in amps
+        '''
+        maxCurrents = [1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+        maxCurrent = maxCurrents[currentRange]
+
+        return maxCurrent * voltageArray / 1000 # divide by 1000 to convert mV to V
 
     def initAWG(self):
         '''
@@ -326,7 +360,7 @@ class Picoscope():
                                         # setting to max 0xFFFFFFFF runs continuously
             0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
             ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
-            ctypes.c_int32(0),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
+            ctypes.c_int32(1),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
             #                   else _SOFT_TRIG maybe?
             1  # extInThreshold = 0 (not using external trigger)
         )
@@ -460,11 +494,13 @@ class Picoscope():
         self.channelARawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
         self.channelBRawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
         self.channelCRawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
+        self.channelDRawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
 
         # allocate streaming buffers
         self.channelABuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
         self.channelBBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
         self.channelCBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        self.channelDBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
 
         # initialize trackers that will be used by the callback function to copy data from buffers to proper location in data arrays
         # these are based on the streaming example in the picosdk github
@@ -475,7 +511,7 @@ class Picoscope():
         # set data buffer (points the scope to the allocated buffers for fast saving)
         # args:
         #   chandle (int16)
-        #   channel (0-2 - each channel needs its own data buffer)
+        #   channel (0-3 - each channel needs its own data buffer)
         #   buffer (pointer to array of int16) - location of data
         #   bufferLth (int32) - length of buffer arrays (i.e. self.scopeSamples)
         #   segmentIndex (uint32) - not used in streaming mode
@@ -486,11 +522,14 @@ class Picoscope():
                                                 self.dataBufferSize, 0, 0)
         bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
                                                 self.dataBufferSize, 0, 0)
+        bufferDStatus = ps.ps2000aSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
+                                                self.dataBufferSize, 0, 0)
 
         # error checking
         assert_pico_ok(bufferAStatus)
         assert_pico_ok(bufferBStatus)
         assert_pico_ok(bufferCStatus)
+        assert_pico_ok(bufferDStatus)
 
     def streamingCallback(self, handle, numberOfSamples, startIndex, overflow, triggerAT, triggered, autoStop,
                           pParameter):
@@ -519,6 +558,7 @@ class Picoscope():
         self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
         self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
         self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
+        self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[startIndex: sourceEnd]
         self.nextSample += numberOfSamples
         if autoStop:
             self.autoStopOuter = True
@@ -534,3 +574,7 @@ class Picoscope():
         '''
         closeStatus = ps.ps2000aCloseUnit(self.cHandle)
         assert_pico_ok(closeStatus)
+
+# a test input function for the AWG
+def testVT(times, freq = 100, amp = 0.1):
+    return amp * np.sin(2 * np.pi * times * freq)
