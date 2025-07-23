@@ -147,6 +147,7 @@ class Database:
             potentiostatTrigger array,
             time array,
             awg array,
+            awgBuffer array,
             awgTime array,'''
 
         # next add a column for each parameter in the input parameters dict

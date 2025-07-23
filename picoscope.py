@@ -443,8 +443,9 @@ class Picoscope():
         assert_pico_ok(phaseStatus)
 
         # create linspace of times, use to output voltages from vtFunc
-        times = np.linspace(0, self.vtPeriod, self.numberOfPoints)
-        voltages = self.vtFunc(times, *self.vtFuncArgs, **self.vtFuncKwargs) * 1e6  # convert to uV
+        self.awgTime = np.linspace(0, self.vtPeriod, self.numberOfPoints)
+        voltages = self.vtFunc(self.awgTime, *self.vtFuncArgs, **self.vtFuncKwargs) * 1e6  # convert to uV
+        self.awg = voltages # used for saving later
 
         # convert values to awg buffer sample values
         # formula in SDK is vout = 1uV * (pkToPk / 2) * (sample value / 32767) + offsetVoltage
@@ -458,6 +459,7 @@ class Picoscope():
         # is max-min not the same as peak-to-peak when we don't have the full wave? it doesn't make sense that that makes the scaling break
         waveformArray = np.array((65534 * (voltages  - self.awgOffset.value)) / self.pkToPk.value, dtype = ctypes.c_int16)
         self.waveformBuffer = np.ctypeslib.as_ctypes(waveformArray)
+        self.awgBuffer = self.waveformBuffer # renaming for later saving
 
         return 0
 
