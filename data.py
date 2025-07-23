@@ -33,9 +33,10 @@ class Database:
             adaptArray(arr: numpy array): defines an adapter for converting numpy arrays to an sqlite-usable format
             convertArray(text): defines a converter for reading numpy arrays that have been saved using adaptArray
             dataTableInitializer(params : dict): creates the data table based on the experimental parameters
-            parseQuery(inputDict: dict, table : str): generates an SQlite query string and a list of data in order to write the input dict into a table
+            parseQuery(inputDict: dict, newRow : bool, keyCol : str, keyVal, table : str): generates an SQlite query string and a list of data in order to write the input dict into a table
+                Can either create a new row or update an existing row depending on the value of newRow
             write(query : str, vals : list): takes the output string from parseQuery and writes it into the database
-            writeData(dataDict : dict, table : str): a wrapper function which combines parseQuery and write into a single function
+            writeData(dataDict : dict, newRow : bool, keyCol : str, keyVal, table : str): a wrapper function which combines parseQuery and write into a single function
             writeParameters(params : dict, experimentNumber : int, table : str) : writes the current values of the experimental parameters along with extra metadata
         Class variables:
             connection: sqlite3 database connection
@@ -170,13 +171,20 @@ class Database:
         return initTable
 
     @staticmethod
-    def parseQuery(inputDict: dict, table: str = 'acoustics'):
+    def parseQuery(inputDict: dict, newRow : bool, keyCol : str, keyVal, table: str = 'data'):
         """
         Takes a dict and turns it into an SQL-readable format for writing the data. Converts the data to safe types for
-        the database (ints, floats, arrays, or strings)
+        the database (ints, floats, arrays, or strings) and either writes a new row or updates an existing row with the
+        data
 
         Args:
             inputDict (dict): dict where the keys are columns and values are the data to write in those columns
+            newRow (bool) : should the input data be written as a new row or update an existing row?
+                If True : the INSERT operation is performed
+                If False: the UPDATE operation is performed
+            keyCol (str) : name of the column used to find the correct row to insert if newRow = False
+                For best performance, experimentNumber is recommended
+            keyVal : value of keyCol at the row to write in if newRow = False
             table (str) : the name of the table to write in
         Returns:
             query (str), vals (list) : a query string and the values as a list to be executed on the db connection
@@ -195,7 +203,12 @@ class Database:
             val if (type(val) == int or type(val) == float or type(val) == np.ndarray) else str(val) for val in vals
         ]
 
-        query = 'INSERT INTO ' + table + ' (' + keyString + ') VALUES ' + qMarks + ';'
+        # generate an insert or update string depending on newRow
+        if newRow:
+            query = 'INSERT INTO ' + table + ' (' + keyString + ') VALUES ' + qMarks + ';'
+        else:
+            query = 'UPDATE ' + table + ' SET ' + keyString + ' = ' + qMarks + ' WHERE ' + keyCol + ' = ?'
+            safeVals.append(keyVal)
 
         return query, safeVals
 
@@ -215,25 +228,31 @@ class Database:
 
         return self.cursor.lastrowid
 
-    # todo: this may act weird since we aren't specifying the row?
-    def writeData(self, dataDict : dict, table : str = 'data'):
+    def writeData(self, dataDict : dict, newRow : bool, keyCol : str, keyVal, table : str = 'data'):
         """
         Wrapper function to combine generating query strings and writing into the database
 
         Args:
             dataDict (dict): a dict whose keys are columns and values are data to write into the table
+            newRow (bool) : should the input data be written as a new row or update an existing row?
+                If True : the INSERT operation is performed
+                If False: the UPDATE operation is performed
+            keyCol (str) : name of the column used to find the correct row to insert if newRow = False
+                For best performance, experimentNumber is recommended
+            keyVal : value of keyCol at the row to write in if newRow = False
             table (str) : the name of the table to write into
 
         Returns:
             None
         """
 
-        query, vals = self.parseQuery(dataDict, table)
+        query, vals = self.parseQuery(dataDict, newRow, keyCol, keyVal, table)
         self.write(query, vals)
 
     def writeParameters(self, params : dict, experimentNumber : int, table : str = 'data'):
         """
-        Writes the current values of the experiment params dict, along with the experimentNumber and experimentTime
+        Writes the current values of the experiment params dict, along with the experimentNumber and experimentTime,
+        as a new row in the database
 
         Args:
             params (dict) : experimental params dict defined in main.py
@@ -249,4 +268,15 @@ class Database:
         writeParams['experimentNumber'] = experimentNumber
         writeParams['timeCollected'] = time.time()
 
-        self.writeData(writeParams, table)
+        self.writeData(writeParams, True, 'experimentNumber', experimentNumber, table)
+
+    def close(self):
+        """
+        Wrapper for closing database connection
+
+        Args:
+            None
+        Returns:
+            None
+        """
+        self.connection.close()
