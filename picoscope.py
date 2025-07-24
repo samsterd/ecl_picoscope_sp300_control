@@ -48,34 +48,17 @@ class Picoscope():
         closePicoscope() : closes pico connection
     '''
 
-    def __init__(self, params: dict):
+    def __init__(self):
         '''
-        Gather input parameters and constants, call openPicoscope
+        Connect to the picoscope and define a few constants
 
         Args:
-            params (dict) : input parameters dict, as defined in main.py
+            None
         Returns:
             None
         '''
         self.maxDataBufferSize = 10000  # maximum number of samples each channel's buffer can hold
         # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
-
-        # gather the required parameters from the input dict for convenience
-        # todo: make a gatherParams function that iterates through all needed keys and raises an error with all missing values
-        self.vtFunc = params['vtFunc']
-        self.vtFuncArgs = params['vtFuncArgs']
-        self.vtFuncKwargs = params['vtFuncKwargs']
-        self.vtPeriod = params['vtPeriod']
-        self.tStep = params['tStep']
-        self.experimentTime = params['experimentTime']
-        self.scopeSamples = params['scopeSamples']
-        self.channelARange = params['detectorVoltageRange0']
-        self.channelBRange = params['detectorVoltageRange1']
-        self.channelCRange = params['potentiostatVoltageRange']
-        self.channelDRange = 20 # hardcoding trigger channel range to max
-        self.targetInterval = self.experimentTime / self.scopeSamples
-        self.resolveSampleInterval()
-        self.params = params  # this is redundant but might be helpful for debugging
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
@@ -92,6 +75,33 @@ class Picoscope():
                                                              ctypes.byref(self.minBufferSize),
                                                              ctypes.byref(self.maxBufferSize))
         assert_pico_ok(minMaxStatus)
+
+    def loadExperiment(self, params : dict):
+        '''
+        Loads experimental parameters and does some basic error checking
+
+        Args:
+            params (dict) : input parameters dict, as defined in main.py
+        Returns:
+            None
+        '''
+        # gather the required parameters from the input dict for convenience
+        # todo: make a gatherParams function that iterates through all needed keys and raises an error with all missing values
+        self.vtFunc = params['vtFunc']
+        self.vtFuncArgs = params['vtFuncArgs']
+        self.vtFuncKwargs = params['vtFuncKwargs']
+        self.vtPeriod = params['vtPeriod']
+        self.tStep = params['tStep']
+        self.experimentTime = params['experimentTime']
+        self.scopeSamples = params['scopeSamples']
+        self.channelARange = params['detectorVoltageRange0']
+        self.channelBRange = params['detectorVoltageRange1']
+        self.channelCRange = params['potentiostatVoltageRange']
+        self.channelDRange = 20  # hardcoding trigger channel range to max
+        self.targetInterval = self.experimentTime / self.scopeSamples
+        self.resolveSampleInterval()
+        self.params = params  # this is redundant but might be helpful for debugging
+
 
     def resolveSampleInterval(self):
         '''
@@ -263,7 +273,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (0 - can't use delay in streaming mode)
         #   autoTrigger_ms (int16 - 10000s - trigger after 10 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 10000)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 1000)
 
         # error check
         assert_pico_ok(chAStatus)
@@ -334,13 +344,13 @@ class Picoscope():
         rawShots = math.floor(self.experimentTime / self.vtPeriod)
         if rawShots > 2e32-1:
             self.awgShots = 2e32-1
-            self.awgTime = self.awgShots.value * self.vtPeriod
+            self.awgDuration = self.awgShots.value * self.vtPeriod
             print("AWG Warning: number of voltage function periods implied by vtPeriod and experimentTime settings exceeds " +
                   "the amount possible using the AWG (2e32-1). Experiment will proceed using maximum allowed value, which " +
-                  "will run for " + str(self.awgTime) + " seconds.")
+                  "will run for " + str(self.awgDuration) + " seconds.")
         else:
             self.awgShots = rawShots
-            self.awgTime = self.awgShots * self.vtPeriod
+            self.awgDuration = self.awgShots * self.vtPeriod
 
         # call setsiggenarbitrary
         sigGenStatus = ps.ps2000aSetSigGenArbitrary(
@@ -455,10 +465,13 @@ class Picoscope():
         self.pkToPk = ctypes.c_uint32(math.floor(np.max(voltages) - np.min(voltages)))  # peak-to-peak voltage rounded to nearest uV
         self.awgOffset = ctypes.c_int32(math.floor((np.max(voltages) + np.min(voltages))/2))
 
-        #todo: revisit this, make sure output voltage is correct. removed a factor of 2 to prevent overflow, but I can't justify why it works
-        # is max-min not the same as peak-to-peak when we don't have the full wave? it doesn't make sense that that makes the scaling break
-        waveformArray = np.array((65534 * (voltages  - self.awgOffset.value)) / self.pkToPk.value, dtype = ctypes.c_int16)
-        self.waveformBuffer = np.ctypeslib.as_ctypes(waveformArray)
+        waveform = (65534 * (voltages  - self.awgOffset.value)) / self.pkToPk.value
+
+        # to avoid overflow, need to cut max and min values to 32767 and -32768.
+        ceilArray = np.where(waveform <= 32767, waveform, 32767)
+        floorArray = np.where(ceilArray >= -32768, ceilArray, -32768).astype(ctypes.c_int16)
+
+        self.waveformBuffer = np.ctypeslib.as_ctypes(floorArray)
         self.awgBuffer = self.waveformBuffer # renaming for later saving
 
         return 0
