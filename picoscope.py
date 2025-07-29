@@ -130,6 +130,7 @@ class Picoscope():
         # error handling done in previous step, array cannot be empty since targetInverval >= 2e-9
         unitIndex = np.argmax(unitVals <= self.targetInterval)
         self.sampleUnits = unitConstants[unitIndex]
+        self.sampleUnitVals = unitVals[unitIndex]
 
         # convert target interval to the sample units, round to nearest int and save
         convertedInterval = math.floor(self.targetInterval / unitVals[unitIndex])
@@ -173,6 +174,7 @@ class Picoscope():
         Returns: None
         '''
         # initialize channels, AWG, and data buffers
+        self.triggered = False
         self.initChannels()
         self.initDataBuffers()
         self.initAWG()
@@ -229,8 +231,8 @@ class Picoscope():
         self.channelDData = np.array(self.channelDRawData.astype(np.int_)) # we want the channel D data in raw ADC to judge the triggering set point
 
         # generate time data. Starts at 0 since there is no delay after trigger
-        # self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval.value, self.scopeSamples)
-        self.time = np.linspace(0, self.experimentTime, self.scopeSamples)
+        self.time = np.linspace(0, (self.scopeSamples - 1) * self.sampleInterval.value * self.sampleUnitVals, self.scopeSamples)
+        # self.time = np.linspace(0, self.experimentTime, self.scopeSamples)
 
         return self.channelAData, self.channelBData, self.channelCData, self.channelDData, self.time
 
@@ -567,16 +569,31 @@ class Picoscope():
             None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
         '''
 
+        self.triggered = self.triggered or triggered
         self.wasCalledBack = True
-        destEnd = self.nextSample + numberOfSamples
-        sourceEnd = startIndex + numberOfSamples
-        self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
-        self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
-        self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
-        self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[startIndex: sourceEnd]
-        self.nextSample += numberOfSamples
         if autoStop:
             self.autoStopOuter = True
+
+        # save data in two cases: was previously triggered, or triggered in this callback
+        if self.triggered and not triggered:
+            destEnd = self.nextSample + numberOfSamples
+            sourceEnd = startIndex + numberOfSamples
+            self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
+            self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
+            self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
+            self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[startIndex: sourceEnd]
+            self.nextSample += numberOfSamples
+
+        elif self.triggered and triggered:
+            # triggered on this callback. Only want data after the triggeredAT index
+            destEnd = self.nextSample + numberOfSamples - triggerAT
+            sourceEnd = startIndex + numberOfSamples
+            self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[triggerAT: sourceEnd]
+            self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[triggerAT: sourceEnd]
+            self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[triggerAT: sourceEnd]
+            self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[triggerAT: sourceEnd]
+            self.nextSample += numberOfSamples - triggerAT
+
 
     def closePicoscope(self):
         '''
