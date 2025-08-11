@@ -61,11 +61,11 @@ class Biologic:
 
         init: find and load essential files, check firmware version, etc. Based on example code in ex_tech_OCV.py
         '''
-        # gather parameters from input dict
+        # gather some parameters from input dict
+        # some parameters are not loaded until the loadExperiment() function to allow them to be changed after loading firmware
         self.params = params
         self.channel = params['potentiostatChannel']
         self.experiment = params['experimentType']
-        self.currentRange = self.params['currentRange']
 
         # do some basic error checking
         if self.experiment != 'ocv' and self.experiment != 'ca':
@@ -73,11 +73,6 @@ class Biologic:
                   '. Valid options are \'ca\' or \'ocv\'.')
         if self.channel != 1 and self.channel != 2:
             raise ValueError("potentiostatChannel must be 1 or 2.")
-        if type(self.currentRange) != int:
-            raise TypeError("currentRange must be an int")
-        if self.currentRange < 0 or self.currentRange > 9:
-            raise ValueError("currentRange must be between 0 and 9. If you are unsure what current range to expect, set to 9"
-                             "to avoid damaging the potentiostat")
 
         # get path to driver files
         self.binaryPath = os.environ.get("ECLIB_DIR", f"C:{os.sep}EC-Lab Development Package{os.sep}lib")
@@ -163,9 +158,23 @@ class Biologic:
                 print("> Board type detection failed")
                 sys.exit(-1)
 
+        # set to floating ground if using external input (for premium boards only)
+        # todo: figure out proper settings for this
+        if self.board_type == KBIO.BOARD_TYPE.PREMIUM.value:
+
+            # set WE/CE connections to standard
+            conn = 0 # KBIO_CONN_STD
+
+            if params['extInput']:
+                gnd = 1 # KBIO_MODE_FLOATING
+                self.api.SetHardConf(self.id, self.channel, conn, gnd)
+            else:
+                gnd = 0 # KBIO_MODE_GROUNDED
+                self.api.SetHardConf(self.id, self.channel, conn, gnd)
+
         # self.loadExperiment()
 
-    def loadExperiment(self):
+    def loadExperiment(self, params):
         '''
         Gather experimental parameters from input dict depending on 'experimentType', converts them to ECC_Parms and calls
         api.LoadTechnique()
@@ -205,6 +214,17 @@ class Biologic:
                 cycle
         :return:
         '''
+        # update the input parameters, load the current range
+        # todo: come up with a more intelligent way to overwrite params?
+        self.params = params
+        self.currentRange = self.params['currentRange']
+
+        if type(self.currentRange) != int:
+            raise TypeError("currentRange must be an int")
+        if self.currentRange < 0 or self.currentRange > 9:
+            raise ValueError("currentRange must be between 0 and 9. If you are unsure what current range to expect, set to 9"
+                             "to avoid damaging the potentiostat")
+
         # generate parameters for the external input
         ext_parms = {
             "xctr": ECC_parm("xctr", int),  # option control bitfield parameter
@@ -291,10 +311,6 @@ class Biologic:
 
                 eccParms = make_ecc_parms(self.api, *pSteps, pNumberOfSteps, pdt, pNumberOfCycles, piRange, pxctr, praux2)
 
-
-    # todo: define specific experiment for external CA
-    #   run as CA but run trigger experiment and set parameters: external input, raux2, floating mode?
-    # todo: trigger experiment also needs a tech file
         if self.params['trigger']:
             # need to load the trigger before the experiment
             to_parms = {
@@ -302,7 +318,7 @@ class Biologic:
                 "triggerDuration" : ECC_parm("Trigger_Duration", float)
             }
             pTriggerLogic = make_ecc_parm(self.api, to_parms['triggerLogic'], 1)
-            pTriggerDuration = make_ecc_parm(self.api, to_parms['triggerDuration'], 1e-4) # hard code duration to 100 us
+            pTriggerDuration = make_ecc_parm(self.api, to_parms['triggerDuration'], 0.1) # hard code duration to 100 ms, duration doesn't matter
             triggerParms = make_ecc_parms(self.api, pTriggerLogic, pTriggerDuration)
 
             # load trigger and actual experiment
@@ -351,6 +367,32 @@ class Biologic:
         :return:
         '''
         self.api.StartChannel(self.id, self.channel)
+
+    def experimentDoneQ(self):
+        '''
+        Checks the status of a running experiment and returns True when get_info_data returns a status of "STOP"
+
+        Args: None
+        Returns: bool
+        '''
+        data = self.api.GetData(self.id, self.channel)
+        status, tech = get_info_data(self.api, data)
+
+        if status == "STOP":
+            return True
+        else:
+            return False
+
+    def experimentStatus(self):
+        '''
+        Repots the status of the experiment
+
+        Args: none
+        Returns: str status
+        '''
+        data = self.api.GetData(self.id, self.channel)
+        status, tech = get_info_data(self.api, data)
+        return status
 
     def gatherData(self):
         '''
