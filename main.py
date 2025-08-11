@@ -23,6 +23,8 @@ import numpy as np
 import picoscope as pico
 import biologic as bio
 from matplotlib import pyplot as plt
+import data
+import experiments
 
 # Experiment parameters. Will be added anc sorted as they become apparent
 experimentParameters = {
@@ -63,7 +65,15 @@ experimentParameters = {
     'vStep' : [0], # voltage at each step
     'vStepTime' : [5.0], # time spent at each step. len(vStep) must equal len(vStepTime)
     'startStep' : 0, # step index to start on. Must be less than len(vStep) - 1
-    'numberOfCycles' : 0 # number of times CA is repeated
+    'numberOfCycles' : 0, # number of times CA is repeated
+
+    # saving parameters
+    'save' : False,    # should the data be saved (as an sqlite3 database)
+    'experimentFolder' : 'C://Users//shams//Documents//ecl temp//', # folder to save in. Must end in //
+    'experimentName' : 'impedance_1Hz_1MHz_1uA_trigger_test', # base name of the file. Proper extensions will be appended by the experiment code
+
+    # plotting parameters
+    'plot' : True
 }
 
 def runExperiment(params : dict):
@@ -76,6 +86,11 @@ def runExperiment(params : dict):
     Returns:
         0 : data is saved, nothing returned?
     '''
+    # initialize database
+    if params['save']:
+        db = data.Database(params)
+        db.writeParameters(params, 0)
+
     # make connections to instruments
     # note that potentiostat outputs a voltage spike to the I_monitor when turning on, so this should be
     # done first to avoid accidental triggering
@@ -83,13 +98,33 @@ def runExperiment(params : dict):
     scope = pico.Picoscope(params)
 
     # get experiments ready to run
-    pot.loadExperiment()
+    scope.loadExperiment(params)
+    pot.loadExperiment(params)
     scope.initStream()
+
 
     # run experiments. Note the stream on the picoscope has already started so the potentiostat must start quickly
     #   to avoid filling the scope memory
     pot.runExperimentWithoutData()
     a, b, c, d, t = scope.runStream()
+
+    # plt.plot(scope.awgTime, scope.awgBuffer)
+    # plt.show()
+    # plt.plot(scope.awgTime, scope.awg)
+    # plt.show()
+    # this should be implemented as a function
+    if params['save']:
+        dataDict = {
+            'detector0' : a,
+            'detector1' : b,
+            'potentiostatOut' : c,
+            'potentiostatTrigger' : d,
+            'time' : t,
+            'awg' : scope.awg,
+            'awgTime' : scope.awgTime
+        }
+        db.writeData(dataDict, False, 'experimentNumber', 0)
+        db.close()
     #
     current = scope.voltageToPotentiostatCurrent(c, pot.currentRange)
     fig, ax = plt.subplots(2, 3)

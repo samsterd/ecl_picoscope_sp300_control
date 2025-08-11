@@ -23,7 +23,6 @@ import math
 from picosdk.ps2000a import ps2000a as ps
 from picosdk.functions import adc2mV, assert_pico_ok
 from time import sleep
-from matplotlib import pyplot as plt
 
 
 class Picoscope():
@@ -113,14 +112,16 @@ class Picoscope():
         Returns:
             0. Saves self.sampleInterval and self.sampleUnits : the target interval as an uint32, the Pico constant corresponding to the target units
         '''
-        # handle case where target interval is less than 2 ns
-        if self.targetInterval < 2e-9:
+        # handle case where target interval is less than 16 ns
+        #   16 ns is minimum value that does not result in a PICO_INVALID_SAMPLE_INTERVAL error
+        if self.targetInterval < 16e-9:
             print(
                 "Warning: requested sample interval (experimentTime/scopeSamples) is less than the sampling limit of the "
-                "Picoscope (2 ns). A 2 ns interval will be used and number of samples will be adjusted to match experimentTime")
-            self.scopeSamples = math.floor(self.experimentTime / 2e-9)
-            self.sampleInterval = ctypes.c_uint32(2)
+                "Picoscope (16 ns). A 16 ns interval will be used and number of samples will be adjusted to match experimentTime")
+            self.scopeSamples = math.floor(self.experimentTime / 16e-9)
+            self.sampleInterval = ctypes.c_uint32(16)
             self.sampleUnits = ps.PS2000A_TIME_UNITS['PS2000A_NS']
+            self.sampleUnitVals = 1e-9
             return 0
 
         unitConstants = [ps.PS2000A_TIME_UNITS['PS2000A_S'], ps.PS2000A_TIME_UNITS['PS2000A_MS'], ps.PS2000A_TIME_UNITS['PS2000A_US'], ps.PS2000A_TIME_UNITS['PS2000A_NS']]
@@ -206,7 +207,6 @@ class Picoscope():
 
         # convert the callback function to a C function pointer
         callbackPointer = ps.StreamingReadyType(self.streamingCallback)
-
         # gather data in a loop
         while self.nextSample < self.scopeSamples and not self.autoStopOuter:
             self.wasCalledBack = False
@@ -357,7 +357,7 @@ class Picoscope():
         # call setsiggenarbitrary
         sigGenStatus = ps.ps2000aSetSigGenArbitrary(
             self.cHandle,  # scope identifier, int16
-            self.awgOffset,  # offsetVoltage = 0 (int32)
+            self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
             self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
             self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
             self.startDeltaPhase,  # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
@@ -570,11 +570,17 @@ class Picoscope():
         '''
 
         self.triggered = self.triggered or triggered
+        # self.triggered = True
+        firstTrigger = self.triggered
         self.wasCalledBack = True
+
+        # this section is included in the example but really not sure what it is doing :(
         if autoStop:
             self.autoStopOuter = True
 
         # save data in two cases: was previously triggered, or triggered in this callback
+        # todo: new problem - delay between pot.runExperiment and scope.runStream is too long for very short experiments
+        #       I THINK that no data is getting recorded
         if self.triggered and not triggered:
             destEnd = self.nextSample + numberOfSamples
             sourceEnd = startIndex + numberOfSamples
@@ -586,13 +592,14 @@ class Picoscope():
 
         elif self.triggered and triggered:
             # triggered on this callback. Only want data after the triggeredAT index
-            destEnd = self.nextSample + numberOfSamples - triggerAT
-            sourceEnd = startIndex + numberOfSamples
+            triggeredSamples = numberOfSamples - triggerAT
+            destEnd = self.nextSample + triggeredSamples
+            sourceEnd = triggerAT + triggeredSamples
             self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[triggerAT: sourceEnd]
             self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[triggerAT: sourceEnd]
             self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[triggerAT: sourceEnd]
             self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[triggerAT: sourceEnd]
-            self.nextSample += numberOfSamples - triggerAT
+            self.nextSample += triggeredSamples
 
 
     def closePicoscope(self):
