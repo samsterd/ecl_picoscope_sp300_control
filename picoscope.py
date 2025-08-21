@@ -22,7 +22,7 @@ import numpy as np
 import math
 from picosdk.ps2000a import ps2000a as ps
 from picosdk.functions import adc2mV, assert_pico_ok
-from time import sleep
+import time
 
 
 class Picoscope():
@@ -92,12 +92,12 @@ class Picoscope():
         self.vtPeriod = params['vtPeriod']
         self.tStep = params['tStep']
         self.experimentTime = params['experimentTime']
-        self.scopeSamples = params['scopeSamples']
+        self.targetSamples = params['scopeSamples']
         self.channelARange = params['detectorVoltageRange0']
         self.channelBRange = params['detectorVoltageRange1']
         self.channelCRange = params['potentiostatVoltageRange']
         self.channelDRange = 20  # hardcoding trigger channel range to max
-        self.targetInterval = self.experimentTime / self.scopeSamples
+        self.targetInterval = self.experimentTime / self.targetSamples
         self.resolveSampleInterval()
         self.params = params  # this is redundant but might be helpful for debugging
 
@@ -105,7 +105,8 @@ class Picoscope():
     def resolveSampleInterval(self):
         '''
         Helper function that determines the units of the target sample interval and provides a copy of the target interval
-        that can be re-written by ps2000aRunStreaming()
+        that can be re-written by ps2000aRunStreaming(). Also adjusts the scopeSamples parameter to reach as the targeted
+        experimentTime as closely as possible.
 
         Args:
             None. Requires self.targetInterval (float) : the target scope sampling interval determined by the input experimentTime and scopeSamples
@@ -136,6 +137,9 @@ class Picoscope():
         # convert target interval to the sample units, round to nearest int and save
         convertedInterval = math.floor(self.targetInterval / unitVals[unitIndex])
         self.sampleInterval = ctypes.c_uint32(convertedInterval)
+
+        # determine number of samples needed to reach the target experimentTime
+        self.scopeSamples = math.floor(self.experimentTime / (convertedInterval * unitVals[unitIndex]))
 
         return 0
 
@@ -204,6 +208,8 @@ class Picoscope():
         Returns: data arrays (channel A, channel B, channel C, channel D, time)
         '''
         #todo: write checks that initStream was called
+        # self.startTime = time.time()
+        # self.autoTriggerTime = self.startTime + self.experimentTime + 0.033
 
         # convert the callback function to a C function pointer
         callbackPointer = ps.StreamingReadyType(self.streamingCallback)
@@ -213,7 +219,7 @@ class Picoscope():
             getValsStatus = ps.ps2000aGetStreamingLatestValues(self.cHandle, callbackPointer, None)
             if not self.wasCalledBack:
                 # check back based on 10% of the approximate time to fill the buffer
-                sleep(self.approxStreamingInterval / 10)
+                time.sleep(self.approxStreamingInterval / 10)
 
         # stop AWG and collection
         stopStatus = ps.ps2000aStop(self.cHandle)
@@ -345,11 +351,10 @@ class Picoscope():
         # calculate the number of shots needed to run for vtPeriod time. Print a warning if the amount exceeds 2e32-1
         rawShots = math.floor(self.experimentTime / self.vtPeriod)
         if rawShots > 2e32-1:
-            self.awgShots = 2e32-1
+            self.awgShots = 0xFFFFFFFF # max value of 32 bit int sets AWG to run continuously
             self.awgDuration = self.awgShots.value * self.vtPeriod
             print("AWG Warning: number of voltage function periods implied by vtPeriod and experimentTime settings exceeds " +
-                  "the amount possible using the AWG (2e32-1). Experiment will proceed using maximum allowed value, which " +
-                  "will run for " + str(self.awgDuration) + " seconds.")
+                  "the amount possible using the AWG (2e32-1). Experiment will with the AWG set to run continuously.")
         else:
             self.awgShots = rawShots
             self.awgDuration = self.awgShots * self.vtPeriod
@@ -368,7 +373,7 @@ class Picoscope():
             ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
             0, #   # operation = PS2000A_ES_OFF (normal operation)
             0,  # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
-            ctypes.c_uint32(0xFFFFFFFF),# ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+            ctypes.c_uint32(self.awgShots),# ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
                                         # setting to max 0xFFFFFFFF runs continuously
             0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
             ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
@@ -502,10 +507,12 @@ class Picoscope():
             self.approxStreamingInterval = self.dataBufferSize * self.targetInterval
             # experiment will fill more than one buffer, therefore check that there is a reasonable amount of time to execute
             # the copy to memory step. If there isn't, print a warning
-            # todo: determine a reasonable time limit to issue this warning.
-            if self.approxStreamingInterval < 0.001:
-                print("Warning: requested sampling speed may result in discontinuous sampling due to memory speed" +
-                      " bottlenecks. Double check results and consider reducing scopeSamples. ")
+            # according to Picotech, maximum sampling rate for 2205A is 1 MS/s, so check that
+            self.sampleRate = self.scopeSamples / self.experimentTime
+
+            if self.sampleRate > 1e6:
+                print("Warning: requested sampling rate is greater than max specifications. This may result in discontinuous " +
+                      "sampling due to USB and memory bottlenecks. Double check results and consider reducing scopeSamples.")
 
         # allocate data arrays
         self.channelARawData = np.zeros(self.scopeSamples, dtype=ctypes.c_int16)
@@ -568,19 +575,22 @@ class Picoscope():
         Returns:
             None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
         '''
-
+        # print('callback')
+        # self.triggered is used to track whether the scope was triggered at any point during the experiment
+        #   versus triggered (argument) refers to whether the trigger occurs on this particular callback
         self.triggered = self.triggered or triggered
+        if triggered:
+            print('triggered')
         # self.triggered = True
-        firstTrigger = self.triggered
+        # self.autoTrigger = time.time() > self.autoTriggerTime
+
         self.wasCalledBack = True
 
         # this section is included in the example but really not sure what it is doing :(
         if autoStop:
             self.autoStopOuter = True
 
-        # save data in two cases: was previously triggered, or triggered in this callback
-        # todo: new problem - delay between pot.runExperiment and scope.runStream is too long for very short experiments
-        #       I THINK that no data is getting recorded
+        # save data in three cases: was previously triggered, triggered in this callback, or the autotriggertime has elapsed
         if self.triggered and not triggered:
             destEnd = self.nextSample + numberOfSamples
             sourceEnd = startIndex + numberOfSamples
@@ -591,16 +601,27 @@ class Picoscope():
             self.nextSample += numberOfSamples
 
         elif self.triggered and triggered:
-            # triggered on this callback. Only want data after the triggeredAT index
-            triggeredSamples = numberOfSamples - triggerAT
+            # triggered on this callback. Only want data after startIndex + triggeredAT
+            sourceStart = startIndex + triggerAT
+            sourceEnd = startIndex + numberOfSamples
+            triggeredSamples = sourceEnd - sourceStart
             destEnd = self.nextSample + triggeredSamples
-            sourceEnd = triggerAT + triggeredSamples
-            self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[triggerAT: sourceEnd]
-            self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[triggerAT: sourceEnd]
-            self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[triggerAT: sourceEnd]
-            self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[triggerAT: sourceEnd]
+
+            self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[sourceStart: sourceEnd]
+            self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[sourceStart: sourceEnd]
+            self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[sourceStart: sourceEnd]
+            self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[sourceStart: sourceEnd]
             self.nextSample += triggeredSamples
 
+        # elif self.autoTrigger:
+        #     print('autotriggered')
+        #     destEnd = self.nextSample + numberOfSamples
+        #     sourceEnd = startIndex + numberOfSamples
+        #     self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
+        #     self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
+        #     self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
+        #     self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[startIndex: sourceEnd]
+        #     self.nextSample += numberOfSamples
 
     def closePicoscope(self):
         '''

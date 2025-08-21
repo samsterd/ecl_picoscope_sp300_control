@@ -312,16 +312,27 @@ class Biologic:
                 eccParms = make_ecc_parms(self.api, *pSteps, pNumberOfSteps, pdt, pNumberOfCycles, piRange, pxctr, praux2)
 
         if self.params['trigger']:
-            # need to load the trigger before the experiment
+
+            # calculate the duration of the trigger pulse based on the experiment type and timing
+            if self.params['experimentType'] == 'ocv':
+                expTime = self.params['duration']
+            elif self.params['experimentType'] == 'ca':
+                expTime = sum(self.params['vStepTime'])
+            else:
+                expTime = self.params['experimentTime']
+            # set trigger duration to 5% of experiment time or the minimum time (20 us), whichever is larger
+            self.triggerDuration = max(0.05 * expTime, 2e-5)
+
+            # make ecc params for trigger out experiment
             to_parms = {
                 "triggerLogic" : ECC_parm("Trigger_Logic", int),
                 "triggerDuration" : ECC_parm("Trigger_Duration", float)
             }
             pTriggerLogic = make_ecc_parm(self.api, to_parms['triggerLogic'], 1)
-            pTriggerDuration = make_ecc_parm(self.api, to_parms['triggerDuration'], 0.1) # hard code duration to 100 ms, duration doesn't matter
+            pTriggerDuration = make_ecc_parm(self.api, to_parms['triggerDuration'], self.triggerDuration) # hard code duration to 10 ms, duration doesn't matter too much
             triggerParms = make_ecc_parms(self.api, pTriggerLogic, pTriggerDuration)
 
-            # load trigger and actual experiment
+            # load trigger and actual experiment. Trigger must be loaded first
             self.api.LoadTechnique(self.id, self.channel, self.triggerTechFile, triggerParms, first = True, last = False, display = False)
             self.api.LoadTechnique(self.id, self.channel, self.tech_file, eccParms, first = False, last = True, display = False)
 

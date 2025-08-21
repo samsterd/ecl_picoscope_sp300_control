@@ -5,6 +5,10 @@ import copy
 import numpy as np
 import time
 from matplotlib import pyplot as plt
+import scipy.signal
+import math
+import threading
+from multiprocessing import Process, Queue, set_start_method, shared_memory
 
 # experiment functions will live here. Eventually this will become more systematic
 
@@ -49,6 +53,7 @@ def impedanceTest(params : dict, freqStart : float, freqStop : float, numberOfFr
     for i in range(len(freqs)):
 
         f = freqs[i]
+        print(f)
         runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
         runningParams['vtPeriod'] = 1 / f
         runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
@@ -148,33 +153,44 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
             runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
             runningParams['vtPeriod'] = 1 / f
             runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
-            runningParams['experimentTime'] = max(10.1 * runningParams['vtPeriod'], 160e-6) # add 10% extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
-            runningParams['vStepTime'] = [max(10 * runningParams['vtPeriod'], 160e-6)] # minimum timebase for CA is 34 us
+            runningParams['experimentTime'] = max(10.9 * runningParams['vtPeriod'], 0.0011) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
+            runningParams['vStepTime'] = [max(10 * runningParams['vtPeriod'], 0.001)] # minimum timebase for CA is 34 us
             runningParams['scopeSamples'] = 10000
 
             if params['save']:
                 # this should overwrite if re-running
                 db.writeParameters(runningParams, i)
 
-            # get experiments ready to run
-            print(runningParams['currentRange'])
-            scope.loadExperiment(runningParams)
-            pot.loadExperiment(runningParams)
-            scope.initStream()
+            # make sure potentiostat is finished running
+            while not pot.experimentDoneQ:
+                time.sleep(0.1)
 
-
-            # run experiments. Note the stream on the picoscope has already started so the potentiostat must start quickly
-            #   to avoid filling the scope memory
-            pot.runExperimentWithoutData()
-            a, b, c, d, t = scope.runStream()
+            # run experiment
+            startTime = time.time()
+            a, b, c, d, t = runThreaded(runningParams, pot, scope)
+            # scope.loadExperiment(runningParams)
+            # pot.loadExperiment(runningParams)
+            # scope.initStream()
+            #
+            #
+            # # run experiments. Note the stream on the picoscope has already started so the potentiostat must start quickly
+            # #   to avoid filling the scope memory
+            # pot.runExperimentWithoutData()
+            # a, b, c, d, t = scope.runStream()
             current = scope.voltageToPotentiostatCurrent(c, pot.currentRange)
+
+            # make sure the experiment time has elapsed before rerunning
+            time.sleep(1)
+            # currentTime = time.time()
+            # while currentTime < startTime + runningParams['experimentTime']:
+            #     time.sleep(0.1)
+            #     currentTime = time.time()
 
             #  current is low and we could get better signal by reducing the range
             if np.max(abs(c)) < 100 and runningParams['currentRange'] > 4:
 
                 runningParams['currentRange'] -= 1
-                print(runningParams['currentRange'])
-                print(pot.currentRange)
+                print('adjusting range')
                 run = True
 
             else:
@@ -207,15 +223,366 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
                     ax[1, 2].plot(t, current)
                     plt.show()
 
-            # check that the potentiostat is free before proceeding
-            print(pot.experimentStatus())
-            while not pot.experimentDoneQ:
-                time.sleep(0.1)
+            # # check that the potentiostat is free before proceeding
+            # print(pot.experimentStatus())
+            # while not pot.experimentDoneQ:
+            #     time.sleep(0.1)
 
     pot.close()
     scope.closePicoscope()
     if params['save']:
         db.close()
+
+def multiprocessExperiment(params):
+    '''
+    Run a simple Chronoamperometry + AWG experiment with multiprocessing to enable streaming capture while potentiostat starts
+
+    :param params:
+    :return:
+    '''
+    # define names of shared memory
+    shmNames = {'chA' : 'chA',
+    'chB' : 'chB',
+    'chC' : 'chC',
+    'chD' : 'chD',
+    'tName' : 't',
+    'lenName' : 'len'}
+
+
+    # set up db if saving
+    if params['save']:
+        db = data.Database(params)
+        db.writeParameters(params, 0)
+
+    # initialize instrument connections
+    # note that potentiostat outputs a voltage spike to the I_monitor when turning on, so this should be
+    # done first to avoid accidental triggering
+    pot = bio.Biologic(params)
+
+
+    # start multiprocess thread for running picoscope. This will run at the same time as biologic
+    #todo: add args for process
+    picoq = Queue() # create queue for getting data out
+    picoProcess = Process(target = multiProcessPicoWrapper, args = [params, picoq], kwargs = shmNames)
+    picoProcess.start()
+
+    pot.loadExperiment(params)
+    # using queue to wait until streaming starts to run
+    startFlag = picoq.get(block = True)
+    pot.runExperimentWithoutData()
+
+    # wait for picoProcess to finish, check for data in shared memory
+    # todo: this is causing problems. join makes parent process wait until child finishes, but if that happens,
+    #   shared memory is getting garbage collected
+    #   need to find a way to make child process wait until shared memory is accessed
+    #   or just use Queue instead
+
+
+    # gather data from shared memory
+    # ashm = shared_memory.SharedMemory(name = shmNames['chA'])
+    # bshm = shared_memory.SharedMemory(name = shmNames['chB'])
+    # cshm = shared_memory.SharedMemory(name = shmNames['chC'])
+    # dshm = shared_memory.SharedMemory(name = shmNames['chD'])
+    # tshm = shared_memory.SharedMemory(name = shmNames['tName'])
+    # len = shared_memory.SharedMemory(shmNames['lenName'])
+    # a = np.frombuffer(ashm)
+    # b = np.frombuffer(bshm)
+    # current = np.frombuffer(cshm)
+    # d = np.frombuffer(dshm, dtype = np.int_)
+    # t = np.frombuffer(tshm)
+
+    datReturn = picoq.get(block = True)
+    print(len(datReturn))
+    a = datReturn[0]
+    b = datReturn[1]
+    current = datReturn[2]
+    d = datReturn[3]
+    t = datReturn[4]
+
+    picoProcess.join()
+
+
+    print('here')
+    # save data, if applicable
+    # todo: add awgbuffer and time to shared memory if this process works
+    if params['save']:
+        dataDict = {
+            'detector0' : a,
+            'detector1' : b,
+            'potentiostatOut' : current,
+            'potentiostatTrigger' : d,
+            'time' : t
+            # 'awg' : scope.awg,
+            # 'awgTime' : scope.awgTime
+        }
+        db.writeData(dataDict, False, 'experimentNumber', 0)
+        db.close()
+
+    # plot data, if applicable
+    if params['plot']:
+        fig, ax = plt.subplots(2, 3)
+        # ax[0, 0].plot(scope.waveformBuffer)
+        ax[0, 1].plot(t, a)
+        ax[0, 2].plot(t, b)
+        # ax[1, 0].plot(t, c)
+        ax[1, 1].plot(t, d)
+        ax[1, 2].plot(t, current)
+        plt.show()
+
+    # close and unlink shared memory
+    # ashm.close()
+    # bshm.close()
+    # cshm.close()
+    # dshm.close()
+    # tshm.close()
+    # ashm.unlink()
+    # bshm.unlink()
+    # cshm.unlink()
+    # dshm.unlink()
+    # tshm.unlink()
+
+    # close the process
+    picoProcess.close()
+
+    pot.close()
+
+def multiProcessPicoWrapper(params, queue, chA = 'chA', chB = 'chB', chC = 'chC', chD = 'chD', tName = 't', lenName = 'len'):
+    '''
+    Wrapper function that creates a Picoscope object, runs the specified experiment, saves results in a shared memory block,
+    and closes the picoscope. This should be run AFTER connecting to the Biologic to avoid the current spike on startup
+    :param params:
+    :return:
+    '''
+    # todo: architecture for running multiple experiments
+    #   connect
+    #   execution while loop:
+    #       look into queue for orders
+    #       if 'stop': close everything
+    #       if a dict: load. wait for biologic loaded flag, run with those parameters send 'starting' flag, send results into queue
+    #   on other side:
+    #       connect to biologic
+    #       loop experiments:
+    #           adjust params as needed, put them in queue
+    #           load experiment, send flag and wait for streaming flag, run experiment
+    #           get data from queue
+    #   might be useful to learn how locks work - they might be better than sending flags through the queue
+    scope = pico.Picoscope()
+    scope.loadExperiment(params)
+
+    # create shared memory for each of the return buffers
+    # this is done after loadExperiments since the number of samples can change based on pico.resolveSampleInterval()
+    # this is also used to send scopeSamples up to the parent process. There is probably a more efficient way to do this
+    #   but I don't have time to learn it
+    # exArray = np.zeros(scope.scopeSamples)
+    # exIntArray = np.zeros(scope.scopeSamples, dtype = np.int_)
+    # lenArray = np.array[scope.scopeSamples] # this is a silly way to pass a single int in shared memory, but here we are
+    # ashm = shared_memory.SharedMemory(name = chA, create = True, size = exArray.nbytes)
+    # bshm = shared_memory.SharedMemory(name = chB, create = True, size = exArray.nbytes)
+    # cshm = shared_memory.SharedMemory(name = chC, create = True, size = exArray.nbytes)
+    # dshm = shared_memory.SharedMemory(name = chD, create = True, size = exIntArray.nbytes)
+    # tshm = shared_memory.SharedMemory(name = tName, create = True, size = exArray.nbytes)
+    # lenshm = shared_memory.SharedMemory(name = lenName, create = True, size = lenArray.nbytes)
+    # aBuffer = np.ndarray(exArray.shape, dtype = exArray.dtype, buffer = ashm.buf)
+    # bBuffer = np.ndarray(exArray.shape, dtype = exArray.dtype, buffer = bshm.buf)
+    # cBuffer = np.ndarray(exArray.shape, dtype = exArray.dtype, buffer = cshm.buf)
+    # dBuffer = np.ndarray(exIntArray.shape, dtype = exIntArray.dtype, buffer = dshm.buf)
+    # tBuffer = np.ndarray(exArray.shape, dtype = exArray.dtype, buffer = tshm.buf)
+    # lenBuffer = np.ndarray(lenArray.shape, dtype = lenArray.dtype, buffer = lenshm.buf)
+
+    # pass the len into shared memory
+    # lenBuffer[:] = lenArray[:]
+
+    scope.initStream()
+    # send streaming start flag
+    queue.put('start')
+    a, b, c, d, t = scope.runStream()
+    current = scope.voltageToPotentiostatCurrent(c, params['currentRange'])
+
+    queue.put([a, b, current, d, t])
+
+
+    # copy data into shared memory
+    # aBuffer[:] = a[:]
+    # bBuffer[:] = b[:]
+    # cBuffer[:] = current[:]
+    # dBuffer[:] = d[:]
+    # tBuffer[:] = t[:]
+
+    # close connection
+    scope.closePicoscope()
+
+    # close shared memory - unsure if this causes a problem if it wasn't linked to the parent process yet
+    # ashm.close()
+    # bshm.close()
+    # cshm.close()
+    # dshm.close()
+    # tshm.close()
+    #lenshm.close()
+
+def threadedExperiment(params):
+    '''
+    Run a simple Chronoamperometry + AWG experiment with Threading to enable streaming capture while potentiostat starts
+
+    :param params:
+    :return:
+    '''
+
+    # set up db if saving
+    if params['save']:
+        db = data.Database(params)
+        db.writeParameters(params, 0)
+
+    # initialize instrument connections
+    # note that potentiostat outputs a voltage spike to the I_monitor when turning on, so this should be
+    # done first to avoid accidental triggering
+    pot = bio.Biologic(params)
+    time.sleep(1)
+    scope = pico.Picoscope()
+
+    # get experiments ready to run
+    scope.loadExperiment(params)
+    pot.loadExperiment(params)
+
+    # initialize the picoscope thread before starting the stream to minimize delay
+    #   we are threading the runStream and runExperiment functions to allow the callback function to run while the potentiostat
+    #   experiment starts. This avoids issues at higher speeds where the first ~30 ms of data are missed
+    #   due to the limited memory of the Picoscope and the longer run time of pot.runExperiment()
+    picoThread = threading.Thread(target = scope.runStream, name = "Pico", daemon = False)
+    # potThread = threading.Thread(target = pot.runExperimentWithoutData, name = "Pot", daemon = False)
+    scope.initStream()
+
+    # start streaming thread and then start the potentiostat
+    picoThread.start()
+    time.sleep(0.001)
+    pot.runExperimentWithoutData()
+
+    # wait for picoThread to finish
+    picoThread.join()
+
+    # gather data
+    a, b, c, d, t = scope.channelAData, scope.channelBData, scope.channelCData, scope.channelDData, scope.time
+    current = scope.voltageToPotentiostatCurrent(c, pot.currentRange)
+
+    # save data, if applicable
+    if params['save']:
+        dataDict = {
+            'detector0' : a,
+            'detector1' : b,
+            'potentiostatOut' : c,
+            'potentiostatTrigger' : d,
+            'time' : t,
+            'awg' : scope.awg,
+            'awgTime' : scope.awgTime
+        }
+        db.writeData(dataDict, False, 'experimentNumber', 0)
+        db.close()
+
+    # plot data, if applicable
+    if params['plot']:
+        fig, ax = plt.subplots(2, 3)
+        ax[0, 0].plot(scope.waveformBuffer)
+        ax[0, 1].plot(t, a)
+        ax[0, 2].plot(t, b)
+        ax[1, 0].plot(t, c)
+        ax[1, 1].plot(t, d)
+        ax[1, 2].plot(t, current)
+        plt.show()
+
+    pot.close()
+    scope.closePicoscope()
+
+def runThreaded(params, potObj, scopeObj):
+    '''
+    Threaded call to run an experiment that has already been initialized
+
+    Args:
+        params: experiment params dict
+        potObj: a Biologic class object that has been initialized
+        scopeObj: a Picoscope class object that has been initialized
+
+    Returns:
+        experiment output: channel a-d and time data
+    '''
+
+    # get experiments ready to run
+    scopeObj.loadExperiment(params)
+    potObj.loadExperiment(params)
+
+    # initialize the picoscope thread before starting the stream to minimize delay
+    #   we are threading the runStream and runExperiment functions to allow the callback function to run while the potentiostat
+    #   experiment starts. This avoids issues at higher speeds where the first ~30 ms of data are missed
+    #   due to the limited memory of the Picoscope and the longer run time of pot.runExperiment()
+    # todo: do this in the correct multiprocessing syntax (if __name__ = '__main__')
+    picoThread = threading.Thread(target = scopeObj.runStream, name = "Pico")
+    # potThread = threading.Thread(target = pot.runExperimentWithoutData, name = "Pot", daemon = False)
+    scopeObj.initStream()
+
+    # start streaming thread and then start the potentiostat
+    picoThread.start()
+    time.sleep(0.1)
+    potObj.runExperimentWithoutData()
+
+    # wait for picoThread to finish
+    picoThread.join()
+
+    # gather data
+    a, b, c, d, t = scopeObj.channelAData, scopeObj.channelBData, scopeObj.channelCData, scopeObj.channelDData, scopeObj.time
+
+    return a, b, c, d, t
+
+# def runMultiprocess(params, potObj, scopeObj):
+#     '''
+#     Threaded call to run an experiment that has already been initialized
+#
+#     Args:
+#         params: experiment params dict
+#         potObj: a Biologic class object that has been initialized
+#         scopeObj: a Picoscope class object that has been initialized
+#
+#     Returns:
+#         experiment output: channel a-d and time data
+#     '''
+#
+#     # get experiments ready to run
+#     scopeObj.loadExperiment(params)
+#     potObj.loadExperiment(params)
+#
+#     # initialize the picoscope thread before starting the stream to minimize delay
+#
+#
+#     # potThread = threading.Thread(target = pot.runExperimentWithoutData, name = "Pot", daemon = False)
+#     scopeObj.initStream()
+#
+#     # start streaming thread and then start the potentiostat
+#     #   we are threading the runStream and runExperiment functions to allow the callback function to run while the potentiostat
+#     #   experiment starts. This avoids issues at higher speeds where the first ~30 ms of data are missed
+#     #   due to the limited memory of the Picoscope and the longer run time of pot.runExperiment()
+#     # todo: do this in the correct multiprocessing syntax (if __name__ = '__main__')
+#     # if this fails: consider doing the entire pico init/load/run on a separate process, may be issues with shared resources
+#     #   another option is to run the potentiostat through the multiprocess since we aren't grabbing data from it
+#     #   would need to make a wrapper function that takes the parameters and the pot object.
+#     #       BUT the connection probably isn't pickleable for any of these...
+#     #       might be worth it to try, but will likely need a whole revision of the experiment architecture to run multiprocess
+#     #       need 'reload' parallel process
+#     # ... forking reruns whole process on windows
+#     if __name__ == '__main':
+#         set_start_method('fork')
+#         picoProcess = Process(target = scopeObj.runStream)
+#         picoProcess.start()
+#
+#     time.sleep(0.1)
+#     potObj.runExperimentWithoutData()
+#
+#     # wait for picoThread to finish
+#     picoProcess.join()
+#
+#     # gather data
+#     #   unclear if the scopeObj from the process will be different from the original thread
+#     #   may need to implement a connection object - would be limited to 32MB per array...
+#     #   maybe use a shared ctypes array instead? or use shared_memory
+#     a, b, c, d, t = scopeObj.channelAData, scopeObj.channelBData, scopeObj.channelCData, scopeObj.channelDData, scopeObj.time
+#
+#     return a, b, c, d, t
 
 ##########################################
 ##### analysis for impedance data #########
