@@ -8,9 +8,51 @@ from matplotlib import pyplot as plt
 import scipy.signal
 import math
 import threading
-from multiprocessing import Process, Queue, set_start_method, shared_memory
+from multiprocessing import Process, Queue, JoinableQueue, set_start_method, shared_memory
 
 # experiment functions will live here. Eventually this will become more systematic
+#todo: MULTI EXPERIMENTS ARE NOT SAVING DATA!!!!
+
+def runMultiParamList(initParams: dict, paramLists: dict, downTime: float):
+    '''
+    Runs a series of experiments based off of an initial set of parameters and a list of parameters and the values to
+    vary.
+    NOTE: this has very little error checking right now. There is a lot of room for unexpected behavior, be very careful
+    using this
+
+    Args:
+        initParams (dict): an experimentalParameters dict. The values in keys contained in paramLists will be ignored
+        paramLists (dict): a dict with keys that are in the initParams dict and values as a list of experimental parameters to
+            iterate through. The length of each list must be the same
+        downTime (float): amount of time, in seconds, to wait between executing each experiment. During this time the
+            potentiostat is not collecting data and no current is flowing through the setup
+
+    Returns:
+        None. Data saved in the file specified
+    '''
+
+    # error check the param lists dict
+    paramListsLen = -1
+    for val in paramLists.values():
+        if type(val) != list and type(val) != np.ndarray:
+            raise TypeError("runMultiParamList: a value in the paramLists dict is not a list")
+        else:
+            if paramListsLen == -1:
+                paramListsLen = len(val)
+            elif len(val) != paramListsLen:
+                raise ValueError("runMultiParamList: " + str(val) + " does not match the length of other value lists.")
+
+    # generate a list of dicts to pass into multiProcessExperimentMain
+    # this whole design is kind of clunky. Will probably want to redesign the whole thing in the future
+    # first generate copies of initial params
+    paramDicts = [copy.copy(initParams) for i in range(paramListsLen)]
+    # next iterate through and replace each key with the correct value
+    for i in range(paramListsLen):
+        for key in paramLists.keys():
+            paramDicts[i][key] = paramLists[key][i]
+
+    multiProcessExperimentsMain(paramDicts, downTime)
+
 
 def impedanceTest(params : dict, freqStart : float, freqStop : float, numberOfFreqs: int):
     '''
@@ -232,6 +274,385 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
     scope.closePicoscope()
     if params['save']:
         db.close()
+
+# in order to write autoranging, we need the paramList to change while running. impedance with autorange needs a standalone function
+def multiProcessImpedanceExperiment(params, startFreq, endFreq, nFreqs):
+    '''
+    Implements an impedance-like experiment with autoranging current within the multiprocessing framework
+
+    Args:
+        params (dict) : starting experiment params
+        startFreq (float) : starting frequency
+        endFreq (float) : ending frequency
+        nFreqs (int) : number of frequencies to test. These will be sampled in logspace
+    Returns:
+        None. Data saved or plotted as defined in the input params
+    '''
+
+    # create freq list
+    freqs = np.logspace(startFreq, endFreq, nFreqs)
+
+    # overwrite initial parameters list to make this an impedance experiment
+    runningParams = copy.copy(params)
+    runningParams['vtFunc'] = pico.testVT
+    runningParams['vtFuncArgs'] = ()
+    runningParams['vStep'] = [0]
+
+    # initialize database
+    if params['save']:
+        db = data.Database(runningParams)
+
+    # set up queue, start pico process
+    multiQ = JoinableQueue()
+    picoProcess = Process(target = multiProcessExperimentsPico, args = [multiQ])
+    picoProcess.start()
+
+    # connect to biologic
+    pot = bio.Biologic(runningParams)
+
+    # experiment loop
+    for i in range(len(freqs)):
+
+        run = True
+        rerun = False # track whether this is the first run at a given frequency. this is needed for writing/overwriting parameters
+
+        while run and runningParams['currentRange'] >= 4: # 4 is lower limit for current model
+
+            f = freqs[i]
+            print(f)
+            runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
+            runningParams['vtPeriod'] = 1 / f
+            runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
+            runningParams['experimentTime'] = max(10.9 * runningParams['vtPeriod'], 0.000160) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
+            runningParams['vStepTime'] = [max(10 * runningParams['vtPeriod'], 0.001)] # CA runs longer to avoid issues with trigger disappearance
+            # runningParams['scopeSamples'] = 9999
+            # set up scope samples to avoid going above 250kS/s
+            maxSamples = 2.5e5 * runningParams['experimentTime']
+            if maxSamples < 2500:
+                runningParams['scopeSamples'] = 2500
+            else:
+                runningParams['scopeSamples'] = maxSamples
+
+            if params['save']:
+
+                if not rerun:
+                    # only write the parameters if this is the first run
+                    #NOTE: this will not save the correct currentRange if it is later adjusted, but the recorded current will be correct
+                    db.writeParameters(runningParams, i)
+
+            # send 'exp' flag and running params into queue, wait for signal
+            flag = ('exp', runningParams)
+            multiQ.put(flag)
+            multiQ.join()
+
+            # load experiment, wait for start flag
+            pot.loadExperiment(runningParams)
+            startFlag = multiQ.get(block=True)
+
+            # error check: if flag is wrong, things have desynced and we should abandon ship
+            if startFlag != 'start':
+                print("multiProcessExperimentsMain: Desync detected. Subthread returned " + str(
+                    startFlag) + " instead of " +
+                      "'start'. \nExperiment aborted.")
+                multiQ.task_done()
+                break
+
+            # mark flag as received, start experiment
+            multiQ.task_done()  # unclear if the order this is done matters
+            pot.runExperimentWithoutData()
+
+            # wait until potentiostat finished. This may take longer than the picoscope
+            while not pot.experimentDoneQ:
+                time.sleep(0.1)
+
+            # wait for data to enter the queue
+            dat = multiQ.get(block = True)
+
+            # dat should be a dict with the following keys:
+            #   'detector0', 'detector1','potentiostatOut', 'potentiostatCurrent', 'potentiostatTrigger',
+            #   'time', 'awg', 'awgTime'
+            # todo: write a format checker
+
+            # check that dat is correct. If incorrect, desync error
+            if type(dat) != dict:
+                print("multiProcessExperimentsMain: Desync detected. Subthread returned " + str(
+                    dat) + " instead of a data dict."
+                           "Experiment aborted.")
+                break
+
+            # load current channel
+            c = dat['potentiostatOut']
+
+            #  current is low (potentiostat < 100 mV) and we could get better signal by reducing the range
+            if np.max(abs(c)) < 100 and runningParams['currentRange'] > 4:
+
+                runningParams['currentRange'] -= 1
+                print('adjusting range')
+                run = True
+                rerun = True
+
+            else:
+
+                # switch run to break the while loop
+                run = False
+                rerun = False
+
+                if params['save']:
+                    db.writeData(dat, False, 'experimentNumber', i)
+
+                if params['plot']:
+                    plotECL(dat)
+
+            # signal data processing is done for either outcome
+            multiQ.task_done()
+
+    # experiment finished, close everything
+    endFlag = ('end', None)
+    multiQ.put(endFlag)
+
+    pot.close()
+    multiQ.close()
+    picoProcess.join(timeout = 10)
+    picoProcess.close()
+
+def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
+    '''
+    Function for performing experiments using multiprocessing. Runs in tandem with multiProcessExperimentsPico to run a
+    series of ECL experiments using multiprocessing to ensure the Picoscope does not miss the trigger pulse at short
+    experiment times.
+
+    The general control flow is:
+        Initialize saving DB
+        Start PicoProcess -> Pico connects
+        Connect to Biologic, send 'exp' flag
+        Both processes enter experiment loop:
+            Pico loads experiment, starts streaming, waits for 'start' flag to record
+            Biologic loads experiment, sends the 'start' flag, runs experiment
+            Pico puts data in queue while biologic waits
+            Pico waits for next signal (stop or new experiment)
+            Biologic saves/plots
+            If at end of paramList:
+                Send 'end' signal. Loop breaks: Pico closes connection, joins main thread, biologic disconnects, experiment over
+            If more experiments:
+                Send 'exp' signal, restart experiment loop
+
+    todo for future: add error catching and timeouts to avoid program hanging if one of the instruments misses a trigger or something
+
+    Args:
+        paramList: a list of experiment param dicts. They will be executed in order
+                NOTE: the save file will be defined by the first paramList. all experiments will be saved to the same file
+                if the first experiment has save = False, no data will be saved
+        downTime (float): amount of time, in seconds, to wait between executing each experiment. During this time the
+            potentiostat is not collecting data and no current is flowing through the setup
+
+    Returns:
+        None. Data is plotted and saved as defined in the params
+    '''
+    #URGENT TODO: SAVING IS NOT WORKING PROPERLY. SAVES COLUMN NAMES BUT NO DATA! DOES NOT MAKE NEW ROWS FOR EACH EXPERIMENT!
+    # check that input is a list of dicts
+    # todo: write an experimentParamsQ function to check formatting
+    for param in paramList:
+        if type(param) != dict:
+            raise TypeError("multiProcessExperimentsMain: invalid input, paramList must be a list of dicts.")
+
+    firstExp = paramList[0]
+    expNumber = 0
+
+    # set up save file
+    if firstExp['save']:
+        # this will get overwritten in the experiment loop, but must be initialized out of the loop
+        db = data.Database(firstExp)
+
+    # set up queue, start pico process
+    multiQ = JoinableQueue()
+    picoProcess = Process(target = multiProcessExperimentsPico, args = [multiQ])
+    picoProcess.start()
+
+    # connect to biologic
+    pot = bio.Biologic(firstExp)
+
+    # enter experiment loop
+    for exp in paramList:
+
+        # if saving, write parameters into db. This is redundant for the first experiment, but makes the code simpler
+        if exp['save']:
+            print('saving')
+            db.writeData(exp, newRow = True, keyCol = 'experimentNumber', keyVal = expNumber)
+
+        # send 'exp' flag and first params into queue, wait for signal
+        flag = ('exp', exp)
+        multiQ.put(flag)
+        multiQ.join()
+
+        # load experiment, wait for start flag
+        pot.loadExperiment(exp)
+        startFlag = multiQ.get(block = True)
+
+        # error check: if flag is wrong, things have desynced and we should abandon ship
+        if startFlag != 'start':
+            print("multiProcessExperimentsMain: Desync detected. Subthread returned " + str(startFlag) + " instead of " +
+                 "'start'. \nExperiment aborted.")
+            multiQ.task_done()
+            break
+
+        # mark flag as received, start experiment
+        multiQ.task_done() # unclear if the order this is done matters
+        pot.runExperimentWithoutData()
+
+        # wait for data to enter the queue
+        dat = multiQ.get(block = True)
+
+        # dat should be a dict with the following keys:
+        #   'detector0', 'detector1','potentiostatOut', 'potentiostatCurrent', 'potentiostatTrigger',
+        #   'time', 'awg', 'awgTime'
+        # todo: write a format checker
+
+        # check that dat is correct. If incorrect, desync error
+        if type(dat) != dict:
+            print("multiProcessExperimentsMain: Desync detected. Subthread returned " + str(dat) + " instead of a data dict."
+                 "Experiment aborted.")
+            break
+
+        # save and plot data
+        if exp['save']:
+            # this will raise an error if the data keys are not correct, but we should still check earlier
+            print('saving')
+            db.writeData(dat, newRow = True, keyCol = 'experimentNumber', keyVal = expNumber)
+
+        if exp['plot']:
+            plotECL(dat)
+
+        # signal that data is done processing
+        multiQ.task_done()
+
+        if downTime > 0:
+            time.sleep(downTime)
+
+        expNumber += 1
+
+    # finished all experiments
+    # Send 'end' flag, disconnect, join threads
+    endFlag = ('end', None)
+    multiQ.put(endFlag)
+
+    pot.close()
+    multiQ.close()
+    picoProcess.join(timeout = 10)
+    picoProcess.close()
+
+def multiProcessExperimentsPico(queue):
+    '''
+    Secondary thread of multiProcessExperimentsMain. Runs Picoscope, gathers data, and syncs with main function. See
+    multiProcessExperimentsMain for documentation of overall control flow
+
+    Args:
+        queue: Multiprocess queue for communicating with main function. Three types of messages are sent:
+            Experiment flag: used for controlling the central loop. Either ('exp', {params}) to run a new experiment or
+                ('end', None) to break the loop and disconnect
+            Control flag: sent back and forth to synchronize with main
+            Data: a list of numpy arrays sent to main as the result of an experiment
+    Returns:
+         None. Data is saved or plotted in main
+    '''
+    # connect
+    scope = pico.Picoscope()
+
+    # enter main loop
+    while True:
+
+        # wait for experiment flag
+        # todo: add a reasonable timeout?
+        expFlag = queue.get(block = True)
+
+        # check expFlag is formatted correctly
+        if not validExpFlagQ(expFlag):
+            print("multiProcessExperimentsPico: incorrect flag passed to sub-thread. Expected and expFlag, but received "+
+                  str(expFlag) + ".\nAborting experiment.")
+            queue.task_done()
+            break
+
+        # check for end flag and break
+        if expFlag[0] == 'end':
+            queue.task_done()
+            break
+
+        # load parameters, send task_done
+        expParams = expFlag[1]
+        scope.loadExperiment(expParams)
+        queue.task_done()
+
+        # start stream, send 'start' flag, run
+        scope.initStream()
+        queue.put('start')
+        a, b, c, d, t = scope.runStream()
+
+        # format data into dict
+        current = scope.voltageToPotentiostatCurrent(c, expParams['currentRange'])
+        # awg data needs to be converted to numpy arrays since pickle can't handle ctype arrays
+        awg = np.array(scope.awgBuffer)
+        awgTime = np.array(scope.awgTime)
+        dat = {
+            'detector0' : a,
+            'detector1' : b,
+            'potentiostatOut' : c,
+            'potentiostatCurrent' : current,
+            'potentiostatTrigger' : d,
+            'time' : t,
+            'awg' : awg,
+            'awgTime' : awgTime
+        }
+
+        # enqueue data, wait for queue join() before restarting loop
+        # note for control: it is essential that we check the data was taken off the queue before waiting for the next flag,
+        #   otherwise we will just read the data as the next flag and it will be bad
+        queue.put(dat)
+        queue.join()
+
+    # received 'end' or desync error: disconnect, join with main
+    scope.closePicoscope()
+
+def validExpFlagQ(flag):
+    '''
+    Helper function that evaluates if an input is a valid expFlag used to communicate between processes
+    Checks it is a 2-tuple that is either ('exp', expParams) or ('end', None)
+
+    Args:
+         flag : thing to test
+    Returns:
+        bool : is flag an expFlag
+    '''
+    if type(flag) != tuple:
+        return False
+
+    if len(flag) != 2:
+        return False
+
+    if flag[0] == 'exp':
+        if validExpParamQ(flag[1]):
+            return True
+        else: return False
+
+    elif flag[0] == 'end':
+        if flag[1] == None:
+            return True
+        else:
+            return False
+
+    return False
+
+def validExpParamQ(param):
+    '''
+    Helper function that evaluates if an input is a valid experiment params dict
+    todo:  expandf this, currently just testing if its a dict
+    Args:
+        param : anything we want to test
+    Returns:
+        bool : is it a valid exp param dict
+    '''
+    if type(param) == dict:
+        return True
+    else:
+        return False
 
 def multiprocessExperiment(params):
     '''
@@ -583,6 +1004,41 @@ def runThreaded(params, potObj, scopeObj):
 #     a, b, c, d, t = scopeObj.channelAData, scopeObj.channelBData, scopeObj.channelCData, scopeObj.channelDData, scopeObj.time
 #
 #     return a, b, c, d, t
+
+def plotECL(dat : dict):
+    '''
+    Plots the ECL data contained in a dict. Results in a 6 panel figure:
+        0,0 : AWG wave
+        0,1 : channel A
+        0,2 : channel B
+        1,0 : channel C
+        1,1 : channel C converted to current
+        1,2 : channel D
+
+    Args:
+        dat (dict) : must contain the following keys: 'detector0', 'detector1','potentiostatOut', 'potentiostatCurrent',
+        'potentiostatTrigger', 'time', 'awg', 'awgTime'
+    '''
+    # unpack dat for easier use
+    t = dat['time']
+    a = dat['detector0']
+    b = dat['detector1']
+    c = dat['potentiostatOut']
+    current = dat['potentiostatCurrent']
+    d = dat['potentiostatTrigger']
+    awg = dat['awg']
+    awgTime = dat['awgTime']
+
+    fig, ax = plt.subplots(2, 3)
+
+    ax[0, 0].plot(awgTime, awg)
+    ax[0, 1].plot(t, a)
+    ax[0, 2].plot(t, b)
+    ax[1, 0].plot(t, c)
+    ax[1, 1].plot(t, current)
+    ax[1, 2].plot(t, d)
+
+    plt.show()
 
 ##########################################
 ##### analysis for impedance data #########
