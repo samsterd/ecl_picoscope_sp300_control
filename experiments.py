@@ -460,7 +460,6 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
 
     # set up save file
     if firstExp['save']:
-        # this will get overwritten in the experiment loop, but must be initialized out of the loop
         db = data.Database(firstExp)
 
     # set up queue, start pico process
@@ -474,7 +473,10 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
     # enter experiment loop
     for exp in paramList:
 
-        # if saving, write parameters into db. This is redundant for the first experiment, but makes the code simpler
+        # need to add the experimentNumber value to the experiment parameters for saving purposes
+        exp['experimentNumber'] = expNumber
+
+        # if saving, write parameters into db
         if exp['save']:
             print('saving')
             db.writeData(exp, newRow = True, keyCol = 'experimentNumber', keyVal = expNumber)
@@ -517,7 +519,7 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
         if exp['save']:
             # this will raise an error if the data keys are not correct, but we should still check earlier
             print('saving')
-            db.writeData(dat, newRow = True, keyCol = 'experimentNumber', keyVal = expNumber)
+            db.writeData(dat, newRow = False, keyCol = 'experimentNumber', keyVal = expNumber)
 
         if exp['plot']:
             plotECL(dat)
