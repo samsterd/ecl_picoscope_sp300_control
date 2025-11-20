@@ -505,3 +505,43 @@ def applyFunctionToData(dataDict : dict, func, resKey, dataKeys, *funcArgs):
     savePickle(dataDict)
 
     return dataDict
+
+def generateVoltageProfile(dat, vtFunc : callable):
+    '''
+    NOTE: THIS DIRECTLY EVALUATES STRINGS FROM DATA INPUTS AND IS UNSAFE IF YOU DO NOT TRUST YOUR DATA SOURCE
+    Currently only handles a single chronoamperometry voltage
+
+    Generates the applied voltage at the same time steps as measured on the oscilloscope. Note this is an interpolation
+    does not precisely match with the AWG timing
+    This combines information from the input vtFunc parameters and the chronoamperometry experiment
+
+    Args:
+        dat (dict) : experimental data dict imported from a pickle
+        vtFunc (func) : function used to generate the awg input
+    Returns:
+        array, array : An array of time values and an array of voltages applied from the potentiostat + awg
+                        Both are sampled at the oscilloscope frequency and cutoff by the end of the chronoamperometry experiment
+
+
+    '''
+    # gather vtfunc args and kwargs.Requires direct eval of strings - TRUST YOUR DATA BEFORE USING
+    vtArgs = eval(dat['vtFuncArgs'])
+    vtKwargs = eval(dat['vtFuncKwargs'])
+
+    # gather chronoamperometry and other measurement parameters
+    tStop = dat['vStepTime'][-1]
+    caVoltage = dat['vStep'][0] # todo: this only handles a single voltage. Need to upgrade to make a piecewise function
+
+    # determine number of time steps from time array and tStop value (tStop does not need to equal experimentTime)
+    time = dat['time']
+    boundedTime = time[np.nonzero(time <= tStop)]
+    samples = len(boundedTime)
+
+    # evaluate the awg applied voltage using vtFunc
+    xVals = np.linspace(0, tStop, samples)
+    awgVoltages = vtFunc(xVals, *vtArgs, **vtKwargs)
+
+    return boundedTime, awgVoltages + caVoltage
+
+# need to make an interpolate voltage profile
+# takes the awg and awgTime, repeats it for caTime, then interpolates it to the same time spacing as the data channels

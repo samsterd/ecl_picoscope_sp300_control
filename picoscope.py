@@ -579,8 +579,7 @@ class Picoscope():
         # self.triggered is used to track whether the scope was triggered at any point during the experiment
         #   versus triggered (argument) refers to whether the trigger occurs on this particular callback
         self.triggered = self.triggered or triggered
-        if triggered:
-            print('triggered')
+
         # self.triggered = True
         # self.autoTrigger = time.time() > self.autoTriggerTime
 

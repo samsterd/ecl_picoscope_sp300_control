@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 import scipy.signal
 import math
 import threading
+import tqdm
 from multiprocessing import Process, Queue, JoinableQueue, set_start_method, shared_memory
 
 # experiment functions will live here. Eventually this will become more systematic
@@ -475,10 +476,10 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
 
         # need to add the experimentNumber value to the experiment parameters for saving purposes
         exp['experimentNumber'] = expNumber
+        exp['timeCollected'] = time.time()
 
         # if saving, write parameters into db
         if exp['save']:
-            print('saving')
             db.writeData(exp, newRow = True, keyCol = 'experimentNumber', keyVal = expNumber)
 
         # send 'exp' flag and first params into queue, wait for signal
@@ -518,7 +519,6 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
         # save and plot data
         if exp['save']:
             # this will raise an error if the data keys are not correct, but we should still check earlier
-            print('saving')
             db.writeData(dat, newRow = False, keyCol = 'experimentNumber', keyVal = expNumber)
 
         if exp['plot']:
@@ -1193,3 +1193,94 @@ def testPotentiostat(params):
     pot.runExperimentWithoutData()
     time.sleep(1)
     pot.close()
+
+####################################################################################
+################ INPUT WAVES ##########################################
+#############################################################################
+# Functions for generating voltage waves for use as input to AWG
+# All functions must take an array of times as the first argument and return an array of voltages of equal length
+
+# a test input function for the AWG
+def testVT(times, freq = 100, amp = 0.1, offset = 0):
+    return amp * np.sin(2 * np.pi * times * freq) + offset
+
+def sinWave(times, freq = 100, amp = 0.1, offset = 0):
+    '''
+    Returns a sine wave voltage profile
+
+    :param times:
+    :param freq:
+    :param amp:
+    :param offset:
+    :return:
+    '''
+    return amp * np.sin(2 * np.pi * times * freq) + offset
+
+def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5):
+    '''
+    Returns a square wave voltage.
+
+    Args:
+        times (array): input time array
+        freq (float): frequency of square wave
+        amp (float): difference between minimum and maximum voltage. Must be less than 2
+            Note: Positive amp results in starting at the maximum voltage, while a negative amp starts at negative voltage
+        offset (float) : value of minimum voltage. Offset +- amp must be within +-2 V
+        duty (float) : fraction of wave period spent at the voltage maximum. Must be between 0 and 1
+    Returns:
+        array : voltages of square wave of length equal to times
+    '''
+
+    # scipy implementation has a default period of 2pi so time input is stretched by factor of freq to match input
+    # output value is -1 to +1, starting at +1
+    # need to handle positive and negative amp separately since the meaning of duty gets reversed with negative amp
+    if amp > 0:
+        sqBase = scipy.signal.square(2 * np.pi * freq * times, duty)
+    elif amp < 0:
+        sqBase = -1 * scipy.signal.square(2 * np.pi * freq * times, 1 - duty)
+    else:
+        # handle case where amp is 0 because the user is being silly
+        sqBase = np.zeros(len(times))
+
+    # need to reposition and compress the wave such that the minimum voltage is 0 and max is 1 (add 1, multiply by 0.5)
+    # next, scale by abs(amp) since the sign was handled previously
+    # finally, add the offset value and return
+    return (abs(amp) * (0.5 * (sqBase + 1))) + offset
+
+def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1):
+    '''
+    Returns a random piecewise voltage profile. The time profile is broken into numSteps segments of random length
+    Each step is assigned a random voltage within the specified min/max. Within each step the voltage is constant
+
+    Args:
+        times (array) : input time array
+        numSteps (int) : number of segments to divide time into
+        voltageMin (float) : minimum value of random voltage range. Must be greater than -2
+        voltageMax (float) : maximum value of random voltage range. Must be less than 2
+            Note: Maximum voltage range is 2. Inputs exceeding any of these bounds will result in error messages
+    Returns:
+        array : voltages of random profile of length equal to times
+    '''
+    if voltageMin < -2 or voltageMax > 2 or (voltageMax - voltageMin) > 2:
+        raise ValueError("randomStepProfile: input voltage bounds are outside of AWG range.")
+
+    outputLen = len(times)
+
+    # generate lengths of random segments by using a set of normalized random numbers
+    segmentRands = np.random.rand(numSteps)
+    normSegmentRands = segmentRands / sum(segmentRands)
+    # note: ceil is used to guarantee that the sum of lengths is greater than len(times)
+    #   the end will later be cut off in order to equal the length of times. This may introduce some bias in the length
+    #   of the last section
+    segmentLens = [math.ceil(outputLen * segmentRand) for segmentRand in normSegmentRands]
+
+    # generate segment voltages scaled to (voltageMin, voltageMax)
+    segmentVoltages = ((voltageMax - voltageMin) * np.random.rand(numSteps)) + voltageMin
+
+    # generate arrays for each segment
+    segmentArrs = [segmentVoltages[i] * np.ones(segmentLens[i]) for i in range(numSteps)]
+
+    # combine the segments and truncate to match length of times
+    combinedSegments = np.hstack(tuple(segmentArrs))
+
+    return combinedSegments[:outputLen]
