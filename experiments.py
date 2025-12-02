@@ -591,7 +591,7 @@ def multiProcessExperimentsPico(queue):
         # format data into dict
         current = scope.voltageToPotentiostatCurrent(c, expParams['currentRange'])
         # awg data needs to be converted to numpy arrays since pickle can't handle ctype arrays
-        awg = np.array(scope.awgBuffer)
+        awg = np.array(scope.awg)
         awgTime = np.array(scope.awgTime)
         dat = {
             'detector0' : a,
@@ -1242,10 +1242,9 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
         # handle case where amp is 0 because the user is being silly
         sqBase = np.zeros(len(times))
 
-    # need to reposition and compress the wave such that the minimum voltage is 0 and max is 1 (add 1, multiply by 0.5)
     # next, scale by abs(amp) since the sign was handled previously
     # finally, add the offset value and return
-    return (abs(amp) * (0.5 * (sqBase + 1))) + offset
+    return (abs(amp) * sqBase) + offset
 
 def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1):
     '''
