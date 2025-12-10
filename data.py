@@ -19,7 +19,10 @@ import os
 import copy
 import pickle
 from tqdm import tqdm
+from typing import Callable
 import json
+import bottleneck as bn
+import math
 
 # Adapted from github.com/samsterd/ultrasonicTesting/database.py
 # Class for creating/saving into SQlite Database during experiments
@@ -401,6 +404,52 @@ def sqliteToPickle(file : str):
 
     return dataDict
 
+def multiSqliteToPickle(files : list):
+    '''
+    Converts a list of sqlite files to pickled dicts
+
+    Args:
+        files (list) : a list of file paths for each sqlite file
+    Returns:
+        None : pickles are saved but not returned
+    '''
+    for file in files:
+        print("\nConverting " + file + "\n")
+        sqliteToPickle(file)
+
+def dirSqliteToPickle(dirName : str):
+    '''
+    Converts all sqlite files in a directory to pickled dicts
+
+    Args:
+        dirName (string) : path to the folder with sqlite files.
+    Returns:
+        None : pickles are saved but not returned
+    '''
+
+    fileNames = listFilesInDirectory(dirName, '.sqlite3')
+
+    multiSqliteToPickle(fileNames)
+
+def listFilesInDirectory(dirName : str, ext = '.pickle'):
+    '''
+    Lists all files in a directory with a specified extension. Useful for gathering all data files in a folder
+
+    Args:
+        dirName (string) : path to the folder
+        ext (string) : file extension to look for, in format '.extension'. Default is '.pickle'
+    Returns:
+         list of strings : list of full file paths for each file in dirName with the specified extension
+    '''
+
+    files = os.listdir(dirName)
+    fileNames = []
+    for file in files:
+        if file.endswith(ext):
+            fileNames.append(os.path.join(dirName, file))
+
+    return fileNames
+
 # todo: update description - no longer just for strings!
 # Helper function that takes in a string returned from a table lookup and attempts to convert it to the appropriate data type
 # Only handles floats and lists right now. If it isn't recognized, it returns the unchanged string
@@ -506,8 +555,82 @@ def applyFunctionToData(dataDict : dict, func, resKey, dataKeys, *funcArgs):
 
     return dataDict
 
+# Applies multiple functions to a data set. This can be faster than calling applyFunctionToData multiple times because data only needs to be loaded once
+# takes a dataDict as well as an input called the funcDict, which is a list of dicts with information on the funcs to be applied
+#   funcDictList = [{'func': funcName, 'dataKeys' : ['list of data keys to input'], 'resKey' : 'name of key to store func result', 'funcArgs' : [optional key with additional arguments in order]},...]
+#   As an example here's a funcDictList to apply absoluteSum and staltaFirstBreak:
+#   [{'func' : pj.absoluteSum, 'dataKeys' : ['voltage'], 'resKey' : 'absSum'}, {'func': pj.staltaFirstBreak, 'dataKeys' : ['voltage', 'time'], 'resKey' : 'stalta_5_30_0d75', 'funcArgs' : [5,30,0.75]}]
+# Applies the functions to the data and then returns the new dataDict
+def applyFunctionsToData(dataDict : dict, funcDictList : list):
+
+    # iterate through keys in datadict
+    for key in dataDict:
+
+        # check that the key is a data set, not parameters or fileName
+        if type(key) == int:
+
+            # iterate through functions in funcDictList
+            for funcDict in funcDictList:
+
+                # format the dataKeys to an iterable input
+                funcInputs = [dataDict[key][dataKey] for dataKey in funcDict['dataKeys']]
+
+                # calculate the value of func. Split depending on whether additional inputs are needed
+                if 'funcArgs' in funcDict.keys():
+                    dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs, *funcDict['funcArgs'])
+
+                else:
+                    dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs)
+
+    #repickle data
+    savePickle(dataDict)
+
+    return dataDict
+
+# Apply a function to a list of files
+def applyFunctionToPickles(fileNames : list,  func : Callable, resKey, dataKeys, *funcArgs):
+
+    for i in tqdm(range(len(fileNames))):
+
+        file = fileNames[i]
+        dataDict = loadPickle(file)
+        applyFunctionToData(dataDict, func, resKey, dataKeys, *funcArgs)
+
+# same as above, but uses applyFunctionsToData and takes a funcDictList as input
+def applyFunctionsToPickles(fileNames : list, funcDictList : list):
+    ''' funcDictList = [{'func': funcName, 'dataKeys' : ['list of data keys to input'], 'resKey' : 'name of key to store func result', 'funcArgs' : [optional key with additional arguments in order]},...]
+    '''
+    for i in tqdm(range(len(fileNames))):
+
+        file = fileNames[i]
+        dataDict = loadPickle(file)
+        applyFunctionsToData(dataDict, funcDictList)
+
+# Apply a function to all of the .pickles in a directory
+def applyFunctionToDir(dirName : str, func : Callable, resKey, dataKeys, *funcArgs):
+
+    fileNames = listFilesInDirectory(dirName)
+
+    applyFunctionToPickles(fileNames, func, resKey, dataKeys, *funcArgs)
+
+# same as above, but for multiple functions using the funcDictList format
+def applyFunctionsToDir(dirName : str, funcDictList : list):
+    '''funcDictList = [{'func': funcName, 'dataKeys' : ['list of data keys to input'], 'resKey' : 'name of key to store func result', 'funcArgs' : [optional key with additional arguments in order]},...]
+    '''
+    fileNames = listFilesInDirectory(dirName)
+
+    applyFunctionsToPickles(fileNames, funcDictList)
+
+################################################################################
+################### Data Processing Functions ###################################
+##################################################################################
+
+# This section contains functions that can be used with applyFunctionToData() for processing experimental data
+#   e.g. filtering, interpolating, and analyzing
+
 def generateVoltageProfile(dat, vtFunc : callable):
     '''
+    NOTE: DEPRECATED. USE INTERPOLATE VOLTAGEPROFILE, IT IS MORE ROBUST TO DIFFERENT INPUTS
     NOTE: THIS DIRECTLY EVALUATES STRINGS FROM DATA INPUTS AND IS UNSAFE IF YOU DO NOT TRUST YOUR DATA SOURCE
     Currently only handles a single chronoamperometry voltage
 
@@ -543,5 +666,65 @@ def generateVoltageProfile(dat, vtFunc : callable):
 
     return boundedTime, awgVoltages + caVoltage
 
-# need to make an interpolate voltage profile
-# takes the awg and awgTime, repeats it for caTime, then interpolates it to the same time spacing as the data channels
+def interpolateVoltageProfile(awg, awgTime, expTime, caVoltage):
+    '''
+    Takes the awg profile and time data, as well as the time data to interpolate to (usually the experimental time),
+    and interpolates the awg to all values in the target time array, assuming the awg is periodic
+
+    Args:
+        awg (array) : array of voltages applied by the awg, in V
+        awgTime (array) : array of times for each voltage in awg. len(awg) must equal len(awgTime). Assumed to be in increasing order
+        expTime (array) : array of times to interpolate the applied voltage. Assumed to be in the same time unit as
+            awgTime and in increasing order. Also assumes expTime[0] >= awgTime[0]
+        caVoltage (float) : constant voltage applied by the potentiostat in the Chronoamperometry experiment that runs simultaneous
+            Assumes the CA experiment was applied for the length of expTime
+    Returns:
+        array : array of applied voltages from the potentiostat and AWG, at the time steps specified by expTime
+    '''
+    # calculate period of the awg signal
+    awgPeriod = awgTime[-1] - awgTime[0]
+
+    # to make the interpolation periodic, take the modulus of the time data with the awg period, then use the
+    #   periodic x-axis interpolation
+    modExpTime = expTime % awgPeriod
+    return np.interp(modExpTime, awgTime, awg, period = awgPeriod) + caVoltage
+
+def movingAvgFilter(arr, windowSize : int = 10):
+    '''
+    Returns the moving average along the array with the specified window size. Window is right-indexed: value at index i
+    is the moving average of the i-windowSize:i elements
+
+    Args:
+        arr (array) : array to apply moving average
+        windowSize (int) : size of the moving average window
+    Returns:
+        array : result of filter. Return array has the same length as input array. First windowSize - 1 elements will be
+            the average of < windowSize elements
+    '''
+    return bn.move_mean(arr, windowSize, min_count = 1)
+
+def binAvgReduction(arr, windowSize : int = 10):
+    '''
+    Reduces the data by returning the average of values within a bin determined by windowSize:
+    [average(arr[0:windowSize]), average(arr[windowSize+1:2 * windowSize]),...]
+
+    Args:
+        arr (array) : array to apply reduction to
+        windowSize (int) : size of bins for averaging
+    Returns:
+        array : binned data. Array length is floor(len(arr) / windowSize)
+    '''
+    movingAvg = movingAvgFilter(arr, windowSize)
+    return movingAvg[windowSize::windowSize] # starting index is windowSize since moving average is right-indexed (see movingAvgFilter documentation)
+
+def photonCounter(arr, threshold = 100):
+    '''
+    Attempts to convert raw voltage data to photon counts.
+
+    Args:
+        arr (array) : raw voltage array, assumed to be in mV
+        threshold (float or int) : threshold value for a single photon detection (in mV) on the SiPM at the measured gain setting
+    Returns:
+        array : input array discretized to a floored photon count
+    '''
+    return np.fix(arr / threshold) # fix is a floor towards zero. prevents slightly negative values going to -1
