@@ -22,6 +22,7 @@ from tqdm import tqdm
 from typing import Callable
 import json
 import bottleneck as bn
+from matplotlib import pyplot as plt
 import math
 
 # Adapted from github.com/samsterd/ultrasonicTesting/database.py
@@ -620,6 +621,28 @@ def applyFunctionsToDir(dirName : str, funcDictList : list):
     fileNames = listFilesInDirectory(dirName)
 
     applyFunctionsToPickles(fileNames, funcDictList)
+
+def compareDatsAtKey(datList : list, titles : list, expIndex : int, xKey : str, yKeys : list):
+    '''
+    Generates side-by-side plots from lists at the same experiment index
+
+    Args:
+        datList : list of data pickles
+        titles: strings to name the data pickles
+        expIndex : experiment index to plot
+        xKey : data key for the x-axis of all plots
+        yKeys : list of ykeys used for each plot
+    Returns:
+        None. Shows a len(datList) x len(yKeys) panelled plot
+    '''
+    fig, ax = plt.subplots(len(yKeys), len(datList))
+    for i in range(len(datList)):
+        for j in range(len(yKeys)):
+            ax[j, i].plot(datList[i][expIndex][xKey], datList[i][expIndex][yKeys[j]])
+            ax[j, i].set_ylabel(yKeys[j])
+    for i in range(len(titles)):
+        ax[0, i].set_title(titles[i])
+    plt.show()
 
 ################################################################################
 ################### Data Processing Functions ###################################
