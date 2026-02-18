@@ -33,6 +33,7 @@ experimentParameters = {
     'vtFuncArgs' : (), # Tuple, additional positional arguments that will be passed to vtFunc when it is evaluated
     'vtFuncKwargs' : {'freq' : 1, 'amp' : 0.001, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to vtFunc when it is evaluated
     'vtPeriod' : 1, # Duration in seconds of the voltage function. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
+    'awgDelay' : 0.1, # Duration in seconds to wait after the trigger is received before starting the AWG. NOT TESTED YET
     'tStep' : 0.001, # Time step that the vtFunc will be sampled at. Minimum value is also 5e-8 seconds todo: check this
     #todo: add vtPeriods to specify how many times the AWG should repeat, with -1 repeating until experimentTime
     'experimentTime' : 5, # Duration that the vtFunc will be applied and photodetector / potentiostat measurements are done
@@ -41,7 +42,8 @@ experimentParameters = {
                             # and communication bottlenecks from streaming mode (48 kS memory -> need to send data every ~10kS).
                             # NOTE: the combination of time and samples will request a specific sampling interval. The actual
                             # sampling interval will be determined by communication speeds in streaming mode. The actual value will be saved
-                            # TODO: determine empirical limits and add them here
+                            # NOTE: streaming maximum data transfer rate is 1MS/s, or 250kS per channel, leading to a minimum
+                            #   timestep of 4 us. Empirically, the software struggles below 25 us
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
     'detectorVoltageRange1' : 2, # maximum voltage expected on photodetector 1 (Channel B)
     'potentiostatVoltageRange' : 1, # maximum voltage expected on the potentiostat output (Channel C)

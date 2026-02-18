@@ -90,6 +90,7 @@ class Picoscope():
         self.vtFuncArgs = params['vtFuncArgs']
         self.vtFuncKwargs = params['vtFuncKwargs']
         self.vtPeriod = params['vtPeriod']
+        self.awgDelay = params['awgDelay']
         self.tStep = params['tStep']
         self.experimentTime = params['experimentTime']
         self.targetSamples = params['scopeSamples']
@@ -137,6 +138,7 @@ class Picoscope():
         # convert target interval to the sample units, round to nearest int and save
         convertedInterval = math.floor(self.targetInterval / unitVals[unitIndex])
         self.sampleInterval = ctypes.c_uint32(convertedInterval)
+        self.sampleIntervalSeconds = convertedInterval * unitVals[unitIndex]
 
         # determine number of samples needed to reach the target experimentTime
         self.scopeSamples = math.floor(self.experimentTime / (convertedInterval * unitVals[unitIndex]))
@@ -247,7 +249,8 @@ class Picoscope():
         Initializes the measurement channels and triggers on the Picoscope.
         A - Photodetector 0
         B - Photodetector 1
-        C - Potentiostat Out / Trigger
+        C - Potentiostat Out
+        D - Potentiostat Trigger
 
         Args:
             None. Requires 'experimentTime' and 'scopeSamples' parameters in experimentParameters
@@ -272,6 +275,9 @@ class Picoscope():
         chCStatus = ps.ps2000aSetChannel(self.cHandle, 2, 1, 1, self.cRange, 0)
         chDStatus = ps.ps2000aSetChannel(self.cHandle, 3, 1, 1, self.dRange, 0)
 
+        # calculate trigger delay number of samples
+        self.delaySamples = ctypes.c_uint32(math.floor(self.awgDelay / self.sampleIntervalSeconds))
+
         # set trigger. For now, triggering on Channel D - idea is to trigger when potentiostat starts chronoamperometry
         # args:
         #   handle (int16)
@@ -279,9 +285,9 @@ class Picoscope():
         #   source (3 - Channel D)
         #   threshold (int16 - will need to play with this a bit)
         #   direction 0 (ABOVE)
-        #   delay (0 - can't use delay in streaming mode)
+        #   delay (uint32 - ignored for data collection, but allows the start of the AWG to be delayed)
         #   autoTrigger_ms (int16 - 10000s - trigger after 10 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 1000)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, self.delaySamples, 1000)
 
         # error check
         assert_pico_ok(chAStatus)
