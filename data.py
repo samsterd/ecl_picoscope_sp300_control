@@ -24,6 +24,7 @@ import json
 import bottleneck as bn
 from matplotlib import pyplot as plt
 import math
+import scipy.signal
 
 # Adapted from github.com/samsterd/ultrasonicTesting/database.py
 # Class for creating/saving into SQlite Database during experiments
@@ -577,8 +578,14 @@ def applyFunctionsToData(dataDict : dict, funcDictList : list):
                 funcInputs = [dataDict[key][dataKey] for dataKey in funcDict['dataKeys']]
 
                 # calculate the value of func. Split depending on whether additional inputs are needed
-                if 'funcArgs' in funcDict.keys():
+                if 'funcArgs' in funcDict.keys() and 'funcKwargs' in funcDict.keys():
+                    dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs, *funcDict['funcArgs'], **funcDict['funcKwargs'])
+
+                elif 'funcArgs' in funcDict.keys():
                     dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs, *funcDict['funcArgs'])
+
+                elif 'funcKwargs' in funcDict.keys():
+                    dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs, **funcDict['funcKwargs'])
 
                 else:
                     dataDict[key][funcDict['resKey']] = funcDict['func'](*funcInputs)
@@ -644,6 +651,65 @@ def compareDatsAtKey(datList : list, titles : list, expIndex : int, xKey : str, 
         ax[0, i].set_title(titles[i])
     plt.show()
 
+def plotData(dat : dict, index : int, caV : float = 0.):
+    '''
+    Generates a simple four panelled plot of experimental data at the specified experiment index.
+    Plots Detector A and B on top row, applied voltage and measured current on the bottom row
+
+    Args:
+        dat : data dict
+        index : experimentIndex to plot
+        caV : optional, potential applied from the potentiostat via the chronoamperometry experiment
+    Returns:
+        None. Shows plot
+    '''
+
+    exp = dat[index]
+    t = exp['time']
+    da = exp['detector0']
+    db = exp['detector1']
+    c = exp['potentiostatCurrent']
+    awgt = exp['awgTime']
+    awg = exp['awg']
+    v = interpolateVoltageProfile(awg, awgt, t[-1], t, caV)
+
+    fig, ax = plt.subplots(2, 2)
+    ax[0,0].plot(t, da)
+    ax[0,0].set_title('Detector A (Unfiltered)')
+    ax[0,1].plot(t, db)
+    ax[0,1].set_title('Detector B (695 nm Longpass)')
+    ax[1,0].plot(t, v)
+    ax[1,0].set_title('Applied Voltage (V vs Ag/Ag+)')
+    ax[1,1].plot(t, c)
+    ax[1,1].set_title('Current (A)')
+    plt.show()
+
+def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tuple):
+    '''
+    Generates a simple 2 by 2 panelled plot of experimental data at the specified experiment index using user input keys
+
+    Args:
+        dat : data dict
+        index : experimentIndex to plot
+        xKeys : tuple of keys for x-axes. Must be length 4
+        yKeys : tuple of keys for y-axes. Must be length 4
+        titles : tuple of titles for plots. Must be length 4
+    Returns:
+        None. Shows plot
+    '''
+    if len(xKeys) != 4 or len(xKeys) != len(yKeys) or len(xKeys) != len(titles):
+        raise ValueError('plot2by2: length of xKeys, yKeys, and titles must be equal to 4')
+
+    exp = dat[index]
+
+    fig, ax = plt.subplots(2, 2)
+    for i in range(4):
+        # we're getting needlessly fancy with the bitwise operators to index, but its fun
+        ax[i >> 1, i & 1].plot(exp[xKeys[i]], exp[yKeys[i]])
+        ax[i >> 1, i & 1].set_title(titles[i])
+
+    plt.show()
+
 ################################################################################
 ################### Data Processing Functions ###################################
 ##################################################################################
@@ -689,7 +755,7 @@ def generateVoltageProfile(dat, vtFunc : callable):
 
     return boundedTime, awgVoltages + caVoltage
 
-def interpolateVoltageProfile(awg, awgTime, expTime, caVoltage):
+def interpolateVoltageProfile(awg, awgTime, awgDuration, expTime, caVoltage, finalVoltage = None):
     '''
     Takes the awg profile and time data, as well as the time data to interpolate to (usually the experimental time),
     and interpolates the awg to all values in the target time array, assuming the awg is periodic
@@ -699,18 +765,36 @@ def interpolateVoltageProfile(awg, awgTime, expTime, caVoltage):
         awgTime (array) : array of times for each voltage in awg. len(awg) must equal len(awgTime). Assumed to be in increasing order
         expTime (array) : array of times to interpolate the applied voltage. Assumed to be in the same time unit as
             awgTime and in increasing order. Also assumes expTime[0] >= awgTime[0]
+        awgDuration (float) : length of time the AWG is on. When the AWG is off, finalVoltage is used as a constant
         caVoltage (float) : constant voltage applied by the potentiostat in the Chronoamperometry experiment that runs simultaneous
             Assumes the CA experiment was applied for the length of expTime
+        finalVoltage (float) : final constant voltage that is applied after awgDuration. If not specified, caVoltage is used
     Returns:
         array : array of applied voltages from the potentiostat and AWG, at the time steps specified by expTime
     '''
+    # resolve finalVoltage input
+    if finalVoltage == None:
+        fv = caVoltage
+    else:
+        fv = finalVoltage
+
+    # grab the portion of expTime that occurs before awg turns off
+    awgOnTime = expTime[expTime <= awgDuration]
+
+    # generate the constant voltage profile that occurs after awg turns off
+    awgOffLen = len(expTime) - len(awgOnTime)
+    awgOff = np.full(awgOffLen, fv)
+
     # calculate period of the awg signal
     awgPeriod = awgTime[-1] - awgTime[0]
 
     # to make the interpolation periodic, take the modulus of the time data with the awg period, then use the
     #   periodic x-axis interpolation
-    modExpTime = expTime % awgPeriod
-    return np.interp(modExpTime, awgTime, awg, period = awgPeriod) + caVoltage
+    modOnTime = awgOnTime % awgPeriod
+
+    awgOn = np.interp(modOnTime, awgTime, awg, period = awgPeriod) + caVoltage
+
+    return np.concatenate((awgOn, awgOff))
 
 def movingAvgFilter(arr, windowSize : int = 10):
     '''
@@ -751,3 +835,46 @@ def photonCounter(arr, threshold = 100):
         array : input array discretized to a floored photon count
     '''
     return np.fix(arr / threshold) # fix is a floor towards zero. prevents slightly negative values going to -1
+
+def dehankel(m, d, s):
+    '''
+    'undo' the Hankel matrix arrangement performed by pydmd.utils.pseudo_hankel_matrix
+    Used to extract values of snapshots that were Hankel-ized before DMD
+
+    :param m: matrix to be de-Hankelized
+    :param d: d parameter (number of snapshots generated) given to the function that Hankel-ized the matrix
+    :param s: number snapshots to turn the matrix back into
+        m.shape = r, c
+        r = d * s
+    :return: the de-Hankelized matrix
+        shape = (s,
+    '''
+    # todo: this needs lots of testing of m.shape vs d and s if this ends up being useful
+
+    # gather the first s rows up to the end. these will be used as-is
+    dehankel = m[:s, :-1]
+
+    # next iterate through each set of s rows, adding the final column to the output matrix
+    # first calculate the number of sets of rows to iterate through based on the s parameter and shape of the matrix
+    rowSets = math.floor(m.shape[0] / s)
+    for i in range(rowSets):
+        rowEnd = m[i*s:(i*s)+s,-1]
+        dehankel = np.concatenate((dehankel, rowEnd[:,np.newaxis]), axis = 1)
+
+    return dehankel
+
+# creates a butterworth low pass filter, adapted from UT package
+# takes the time as argument, with additional arguments for the transducer frequency (in MHz, default 2.25), filter order (default 5),
+#   and fraction of the transducer frequency to create the filter critical frequency (default 0.2 e.g. 5 MHz transducer -> 1 MHz filter freq)
+def createButterFilter(time, freq = 2.25, order = 5):
+
+    sampleRate = time[1] - time[0] # convert ns to s
+    sampleFreq = 1 / sampleRate
+
+    # N = order of filter. Higher number = slower calculation but steeper cutoff
+    # Wn = critical frequency (gain drops by -3 dB vs passband)
+    # btype = lowpass
+    # analog = False (this is a digital signal)
+    # fs = sampling rate (500,000,000 Hz for 2 ns step size)
+    return scipy.signal.butter(order, freq, btype = 'lowpass', analog = False, fs = sampleFreq, output = 'sos')
+
