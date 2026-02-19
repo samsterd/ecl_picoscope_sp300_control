@@ -31,14 +31,15 @@ experimentParameters = {
     # Oscilloscope params
     'vtFunc' : pico.testVT, # Callable, function that can input an array of time values and output voltages at those times
     'vtFuncArgs' : (), # Tuple, additional positional arguments that will be passed to vtFunc when it is evaluated
-    'vtFuncKwargs' : {'freq' : 1, 'amp' : 0.001, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to vtFunc when it is evaluated
-    'vtPeriod' : 1, # Duration in seconds of the voltage function. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
-    'awgDelay' : 0.1, # Duration in seconds to wait after the trigger is received before starting the AWG. NOT TESTED YET
+    'vtFuncKwargs' : {'freq' : 10, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to vtFunc when it is evaluated
+    'vtPeriod' : 0.1, # Duration in seconds to generate points for the voltage function. Should match period of vtFunc. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
+    'awgDelay' : 0.5, # Duration in seconds to wait after the trigger is received before starting the AWG. TODO: CURRENT IMPLEMENTATION DOES NOT WORK
+    'vtDuration' : 1, # Duration in seconds for the vtFunction to repeat. If not cleanly divisible by vtPeriod, the duration is rounded down
     'tStep' : 0.001, # Time step that the vtFunc will be sampled at. Minimum value is also 5e-8 seconds todo: check this
-    #todo: add vtPeriods to specify how many times the AWG should repeat, with -1 repeating until experimentTime
-    'experimentTime' : 5, # Duration that the vtFunc will be applied and photodetector / potentiostat measurements are done
-    'scopeSamples' : 50000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
-                           # NOTE: Instrument limit is 16ns/sample when running on 4 channels. That limit may be higher with memory constraints
+    #todo: this combination of parameters is very confusing. make this system more intuitive
+    'experimentTime' : 2, # Duration that the vtFunc will be applied and photodetector / potentiostat measurements are done
+    'scopeSamples' : 40000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
+    'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
                             # and communication bottlenecks from streaming mode (48 kS memory -> need to send data every ~10kS).
                             # NOTE: the combination of time and samples will request a specific sampling interval. The actual
                             # sampling interval will be determined by communication speeds in streaming mode. The actual value will be saved

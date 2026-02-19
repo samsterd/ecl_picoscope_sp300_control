@@ -90,6 +90,7 @@ class Picoscope():
         self.vtFuncArgs = params['vtFuncArgs']
         self.vtFuncKwargs = params['vtFuncKwargs']
         self.vtPeriod = params['vtPeriod']
+        self.vtDuration = params['vtDuration']
         self.awgDelay = params['awgDelay']
         self.tStep = params['tStep']
         self.experimentTime = params['experimentTime']
@@ -351,11 +352,19 @@ class Picoscope():
         Returns:
             0 if successful, else -1
         '''
+        # skip this whole step if not using AWG, filling in dummy data to return for later operations
+        if self.vtFunc == None:
+            self.awgTime = np.linspace(0, self.experimentTime, self.scopeSamples)
+            self.awg = np.zeros(self.scopeSamples)
+            return 0
+        else:
+            pass
+
         # initialize the buffer
         self.generateAWGBuffer()
 
-        # calculate the number of shots needed to run for vtPeriod time. Print a warning if the amount exceeds 2e32-1
-        rawShots = math.floor(self.experimentTime / self.vtPeriod)
+        # calculate the number of shots needed to run for vtDuration time. Print a warning if the amount exceeds 2e32-1
+        rawShots = math.floor(self.vtDuration / self.vtPeriod)
         if rawShots > 2e32-1:
             self.awgShots = 0xFFFFFFFF # max value of 32 bit int sets AWG to run continuously
             self.awgDuration = self.awgShots.value * self.vtPeriod
