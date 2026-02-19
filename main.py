@@ -33,7 +33,8 @@ experimentParameters = {
     'vtFuncArgs' : (), # Tuple, additional positional arguments that will be passed to vtFunc when it is evaluated
     'vtFuncKwargs' : {'freq' : 10, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to vtFunc when it is evaluated
     'vtPeriod' : 0.1, # Duration in seconds to generate points for the voltage function. Should match period of vtFunc. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
-    'awgDelay' : 0.5, # Duration in seconds to wait after the trigger is received before starting the AWG. TODO: CURRENT IMPLEMENTATION DOES NOT WORK
+    'awgDelay' : 0.5, # Duration in seconds to wait after the trigger is received before starting the AWG.
+                      # Exact start time will have an uncertainty of ~5 ms, but the exact time point the awg is started will be saved as awgDelayIndex
     'vtDuration' : 1, # Duration in seconds for the vtFunction to repeat. If not cleanly divisible by vtPeriod, the duration is rounded down
     'tStep' : 0.001, # Time step that the vtFunc will be sampled at. Minimum value is also 5e-8 seconds todo: check this
     #todo: this combination of parameters is very confusing. make this system more intuitive

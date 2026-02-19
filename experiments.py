@@ -12,7 +12,6 @@ import tqdm
 from multiprocessing import Process, Queue, JoinableQueue, set_start_method, shared_memory
 
 # experiment functions will live here. Eventually this will become more systematic
-#todo: MULTI EXPERIMENTS ARE NOT SAVING DATA!!!!
 
 def runMultiParamList(initParams: dict, paramLists: dict, downTime: float):
     '''

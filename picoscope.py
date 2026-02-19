@@ -23,6 +23,7 @@ import math
 from picosdk.ps2000a import ps2000a as ps
 from picosdk.functions import adc2mV, assert_pico_ok
 import time
+from copy import copy
 
 
 class Picoscope():
@@ -92,6 +93,7 @@ class Picoscope():
         self.vtPeriod = params['vtPeriod']
         self.vtDuration = params['vtDuration']
         self.awgDelay = params['awgDelay']
+        self.delayQ = not(self.awgDelay == None)
         self.tStep = params['tStep']
         self.experimentTime = params['experimentTime']
         self.targetSamples = params['scopeSamples']
@@ -216,13 +218,24 @@ class Picoscope():
 
         # convert the callback function to a C function pointer
         callbackPointer = ps.StreamingReadyType(self.streamingCallback)
+
+        # create a flag for triggering delayed AWG
+        awgTriggered = False
+
         # gather data in a loop
         while self.nextSample < self.scopeSamples and not self.autoStopOuter:
+
             self.wasCalledBack = False
             getValsStatus = ps.ps2000aGetStreamingLatestValues(self.cHandle, callbackPointer, None)
-            if not self.wasCalledBack:
-                # check back based on 10% of the approximate time to fill the buffer
-                time.sleep(self.approxStreamingInterval / 10)
+
+            # if there is an AWG delay, check if it should be triggered
+            if self.delayQ and not(awgTriggered) and self.nextSample >= self.delaySamples:
+
+                self.awgDelayIndex = copy(self.nextSample)  # set the delay index to the next index to be collected
+                sgsc = ps.ps2000aSigGenSoftwareControl(self.cHandle, 1)
+                assert_pico_ok(sgsc)
+                awgTriggered = True
+
 
         # stop AWG and collection
         stopStatus = ps.ps2000aStop(self.cHandle)
@@ -276,8 +289,6 @@ class Picoscope():
         chCStatus = ps.ps2000aSetChannel(self.cHandle, 2, 1, 1, self.cRange, 0)
         chDStatus = ps.ps2000aSetChannel(self.cHandle, 3, 1, 1, self.dRange, 0)
 
-        # calculate trigger delay number of samples
-        self.delaySamples = ctypes.c_uint32(math.floor(self.awgDelay / self.sampleIntervalSeconds))
 
         # set trigger. For now, triggering on Channel D - idea is to trigger when potentiostat starts chronoamperometry
         # args:
@@ -378,7 +389,7 @@ class Picoscope():
         if self.delayQ:
 
             # delay is requested, so need to use less accurate software trigger
-            self.delaySamples = ctypes.c_uint32(math.floor(self.awgDelay / self.sampleIntervalSeconds))
+            self.delaySamples = math.floor(self.awgDelay / self.sampleIntervalSeconds)
             sigGenStatus = ps.ps2000aSetSigGenArbitrary(
                 self.cHandle,  # scope identifier, int16
                 self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
@@ -401,7 +412,7 @@ class Picoscope():
                 # setting to max 0xFFFFFFFF runs continuously
                 0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
                 ctypes.c_int32(0),  # triggerType = Rising (Enables simple control with sigGenSoftwareControl())
-                ctypes.c_int32(3),  # triggerSource = 3 (PS2000A_SIGGEN_SOFT_TRIG)
+                ctypes.c_int32(4),# WHY THE FUCK IS IT 4 AND NOT 3?!? NEED TO FIGURE OUT HOW TO ACTUALLY USE CONSTANT ENUMS
                 1  # extInThreshold  (not using external trigger, doesn't matter)
             )
 
@@ -480,6 +491,8 @@ class Picoscope():
         # calculate number of points implied by vtPeriod/tStep, check it is within the bounds
         self.numberOfPoints = math.floor(self.vtPeriod / self.tStep) # this isn't saved as a proper Ctype because it needs
                                                                      # to be signed or unsigned depending on the function using it :(
+        #todo: better error handling here. this prints the waring but will keep running and fail later
+        #   better alternative is to just use the max possible number of points
         if self.numberOfPoints < self.minBufferSize.value:
             print("functionToArbitraryWaveform: not enough time points specified. Inputs imply " +
                   str(self.numberOfPoints) + " points but AWG requires " + str(self.minBufferSize) +
@@ -657,10 +670,7 @@ class Picoscope():
             self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[sourceStart: sourceEnd]
             self.nextSample += triggeredSamples
 
-            # trigger the AWG if using a delay
-            if self.delayQ:
-                self.awgDelayIndex = destEnd # set the delay index to the next index to be collected
-                ps.ps2000aSigGenSoftwareControl(self.cHandle, 1)
+
 
         # elif self.autoTrigger:
         #     print('autotriggered')
