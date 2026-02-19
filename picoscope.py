@@ -286,9 +286,9 @@ class Picoscope():
         #   source (3 - Channel D)
         #   threshold (int16 - will need to play with this a bit)
         #   direction 0 (ABOVE)
-        #   delay (uint32 - ignored for data collection, but allows the start of the AWG to be delayed)
+        #   delay (uint32 - ignored for data collection)
         #   autoTrigger_ms (int16 - 10000s - trigger after 10 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, self.delaySamples, 1000)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 1000)
 
         # error check
         assert_pico_ok(chAStatus)
@@ -374,28 +374,66 @@ class Picoscope():
             self.awgShots = rawShots
             self.awgDuration = self.awgShots * self.vtPeriod
 
-        # call setsiggenarbitrary
-        sigGenStatus = ps.ps2000aSetSigGenArbitrary(
-            self.cHandle,  # scope identifier, int16
-            self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
-            self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
-            self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
-            self.startDeltaPhase,  # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
-            0,  # deltaPhaseIncrement = 0 (uint32) - only non-zero when sweeping
-            3,  # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
-            ctypes.byref(self.waveformBuffer),  # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
-            ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
-            ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
-            0, #   # operation = PS2000A_ES_OFF (normal operation)
-            0,  # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
-            ctypes.c_uint32(self.awgShots),# ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
-                                        # setting to max 0xFFFFFFFF runs continuously
-            0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
-            ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
-            ctypes.c_int32(1),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG) (verify this means using a trigger from ps2000aSetSimpleTrigger()
-            #                   else _SOFT_TRIG maybe?
-            1  # extInThreshold = 0 (not using external trigger)
-        )
+        # set SigGen depending on whether a delay is requested
+        if self.delayQ:
+
+            # delay is requested, so need to use less accurate software trigger
+            self.delaySamples = ctypes.c_uint32(math.floor(self.awgDelay / self.sampleIntervalSeconds))
+            sigGenStatus = ps.ps2000aSetSigGenArbitrary(
+                self.cHandle,  # scope identifier, int16
+                self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
+                self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
+                self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
+                self.startDeltaPhase,
+                # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
+                0,  # deltaPhaseIncrement = 0 (uint32) - only non-zero when sweeping
+                3,
+                # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
+                ctypes.byref(self.waveformBuffer),
+                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+                ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
+                ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
+                0,  # # operation = PS2000A_ES_OFF (normal operation)
+                0,
+                # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
+                ctypes.c_uint32(self.awgShots),
+                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+                # setting to max 0xFFFFFFFF runs continuously
+                0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
+                ctypes.c_int32(0),  # triggerType = Rising (Enables simple control with sigGenSoftwareControl())
+                ctypes.c_int32(3),  # triggerSource = 3 (PS2000A_SIGGEN_SOFT_TRIG)
+                1  # extInThreshold  (not using external trigger, doesn't matter)
+            )
+
+        else:
+            # No delay requested, so use scope trigger
+            self.delaySamples = 0
+            self.awgDelayIndex = 0
+            sigGenStatus = ps.ps2000aSetSigGenArbitrary(
+                self.cHandle,  # scope identifier, int16
+                self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
+                self.pkToPk,  # peak to peak in uV,  uint32 - calculated in generateAWGBuffer
+                self.startDeltaPhase,  # (uint32) - calculated in generateAWGBuffer
+                self.startDeltaPhase,
+                # stopDeltaPhase = startDeltaPhase (uint32) - only differs from start when sweeping
+                0,  # deltaPhaseIncrement = 0 (uint32) - only non-zero when sweeping
+                3,
+                # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
+                ctypes.byref(self.waveformBuffer),
+                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+                ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
+                ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
+                0,  # # operation = PS2000A_ES_OFF (normal operation)
+                0,
+                # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
+                ctypes.c_uint32(self.awgShots),
+                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+                # setting to max 0xFFFFFFFF runs continuously
+                0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
+                ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
+                ctypes.c_int32(1),  # triggerSource = 1 (PS2000A_SIGGEN_SCOPE_TRIG)
+                1  # extInThreshold  (not using external trigger, doesn't matter)
+            )
 
         assert_pico_ok(sigGenStatus)
 
@@ -574,16 +612,8 @@ class Picoscope():
                           pParameter):
         '''
         Function that is called by ps2000aGetStreamingLatestValues every time it returns in order to move data from the
-        streaming buffer into memory. Adapted from example code in PicoSDK
-
-        PROBLEM: this needs to be turned into a pointer and fed into ps.StreamingReadyType. The arguments are dictated by
-        the SDK. This means it probably can't use self as an argument, so can't access class variables
-        Need to access self.channelData vars, would strongly prefer not making those globals
-        Ugly possible solution: move initBuffers into runStream function? then variables are accessible?
-        In the example, the streaming_callback function uses variables not defined in the function -
-            doesn't raise errors at start because they are globals, but it is promising?
-        If this doesn't work, will need to make buffers and arrays globals (and then erase when done?)
-        For now: implementing as a class function. I'll see if that fails before implementing everything as globals
+        streaming buffer into memory. Adapted from example code in PicoSDK.
+        Triggering for data collection and AWG is handled here
 
         Args:
             None. Requires that data arrays and buffers were properly set up
@@ -604,7 +634,7 @@ class Picoscope():
         if autoStop:
             self.autoStopOuter = True
 
-        # save data in three cases: was previously triggered, triggered in this callback, or the autotriggertime has elapsed
+        # save data in two cases: was previously triggered or triggered in this callback
         if self.triggered and not triggered:
             destEnd = self.nextSample + numberOfSamples
             sourceEnd = startIndex + numberOfSamples
@@ -626,6 +656,11 @@ class Picoscope():
             self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[sourceStart: sourceEnd]
             self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[sourceStart: sourceEnd]
             self.nextSample += triggeredSamples
+
+            # trigger the AWG if using a delay
+            if self.delayQ:
+                self.awgDelayIndex = destEnd # set the delay index to the next index to be collected
+                ps.ps2000aSigGenSoftwareControl(self.cHandle, 1)
 
         # elif self.autoTrigger:
         #     print('autotriggered')

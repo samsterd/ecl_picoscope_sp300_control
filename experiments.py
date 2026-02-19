@@ -251,7 +251,8 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
                         'potentiostatCurrent' : current,
                         'time' : t,
                         'awg' : scope.awg,
-                        'awgTime' : scope.awgTime
+                        'awgTime' : scope.awgTime,
+                        'awgDelayIndex' : scope.awgDelayIndex
                     }
                     db.writeData(dataDict, False, 'experimentNumber', i)
 
@@ -601,7 +602,8 @@ def multiProcessExperimentsPico(queue):
             'potentiostatTrigger' : d,
             'time' : t,
             'awg' : awg,
-            'awgTime' : awgTime
+            'awgTime' : awgTime,
+            'awgDelayIndex' : scope.awgDelayIndex
         }
 
         # enqueue data, wait for queue join() before restarting loop
@@ -895,7 +897,8 @@ def threadedExperiment(params):
             'potentiostatTrigger' : d,
             'time' : t,
             'awg' : scope.awg,
-            'awgTime' : scope.awgTime
+            'awgTime' : scope.awgTime,
+            'awgDelayIndex' : scope.awgDelayIndex
         }
         db.writeData(dataDict, False, 'experimentNumber', 0)
         db.close()

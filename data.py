@@ -145,6 +145,7 @@ class Database:
         #   time (array)
         #   input wave (array)
         #   input wave time (array)
+        #   awg delay index (int)
 
         initTable = initTable + '''
             experimentNumber INTEGER PRIMARY KEY,
@@ -156,7 +157,8 @@ class Database:
             potentiostatCurrent array,
             time array,
             awg array,
-            awgTime array,'''
+            awgTime array,
+            awgDelayIndex int,'''
 
         # next add a column for each parameter in the input parameters dict
         paramString = ""
