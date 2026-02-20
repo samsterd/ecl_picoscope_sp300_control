@@ -29,16 +29,17 @@ import experiments as exp
 # Experiment parameters. Will be added anc sorted as they become apparent
 experimentParameters = {
     # Oscilloscope params
-    'vtFunc' : pico.testVT, # Callable, function that can input an array of time values and output voltages at those times
-    'vtFuncArgs' : (), # Tuple, additional positional arguments that will be passed to vtFunc when it is evaluated
-    'vtFuncKwargs' : {'freq' : 10, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to vtFunc when it is evaluated
-    'vtPeriod' : 0.1, # Duration in seconds to generate points for the voltage function. Should match period of vtFunc. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
+    'awgFunc' : pico.testVT, # Callable, function that can input an array of time values and output voltages at those times
+    'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
+    'awgFuncKwargs' : {'freq' : 10, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
+    'awgPeriod' : 0.1, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
+    'awgDuration': 1, # Duration in seconds for the awgFunction to repeat. If not cleanly divisible by awgPeriod, the duration is rounded down
     'awgDelay' : 0.5, # Duration in seconds to wait after the trigger is received before starting the AWG.
                       # Exact start time will have an uncertainty of ~5 ms, but the exact time point the awg is started will be saved as awgDelayIndex
     'vtDuration' : 1, # Duration in seconds for the vtFunction to repeat. If not cleanly divisible by vtPeriod, the duration is rounded down
     'tStep' : 0.001, # Time step that the vtFunc will be sampled at. Minimum value is also 5e-8 seconds todo: check this
     #todo: this combination of parameters is very confusing. make this system more intuitive
-    'experimentTime' : 2, # Duration that the vtFunc will be applied and photodetector / potentiostat measurements are done
+    'experimentTime' : 2, # Duration that the awgFunc will be applied and photodetector / potentiostat measurements are done
     'scopeSamples' : 40000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
                             # and communication bottlenecks from streaming mode (48 kS memory -> need to send data every ~10kS).
@@ -161,8 +162,8 @@ def runExperiment(params : dict):
 if __name__ == '__main__':
     # initial test
     res = exp.runMultiParamList(experimentParameters,
-                                    {"vtFunc" : [exp.sinWave, exp.squareWave, exp.squareWave, exp.randomStepProfile,exp.randomStepProfile],
-                                        "vtFuncKwargs" : [
+                                    {"awgFunc" : [exp.sinWave, exp.squareWave, exp.squareWave, exp.randomStepProfile,exp.randomStepProfile],
+                                        "awgFuncKwargs" : [
                                             {'freq': 1, 'amp': 1, 'offset': 0},
                                             {'freq': 1, 'amp': 1, 'offset': 0, 'duty' : 0.5},
                                             {'freq': 1, 'amp': -1, 'offset': 0, 'duty' : 0.3},
@@ -173,7 +174,7 @@ if __name__ == '__main__':
     # 55 runs, 65 seconds each: ~1 hour
     # todo: generate this more efficiently!
     res = exp.runMultiParamList(experimentParameters,
-            {"vtFunc" : [exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave,
+            {"awgFunc" : [exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave,
                          exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave,
                          exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave,
                          exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave,
@@ -184,7 +185,7 @@ if __name__ == '__main__':
                          exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile,
                          exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile, exp.randomStepProfile,
                          exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave, exp.sinWave],
-                "vtFuncKwargs" : [
+                "awgFuncKwargs" : [
                 {'freq': 0.5, 'amp': 1, 'offset': 0},{'freq': 0.8, 'amp': 1, 'offset': 0},
                 {'freq': 1, 'amp': 1, 'offset': 0},{'freq': 2, 'amp': 1, 'offset': 0},
                 {'freq': 3, 'amp': 1, 'offset': 0}, {'freq': 4, 'amp': 1, 'offset': 0},
@@ -212,18 +213,12 @@ if __name__ == '__main__':
                 {'numSteps': 10, 'voltageMin': -1, 'voltageMax': 1},{'numSteps': 10, 'voltageMin': -1, 'voltageMax': 1},
                 {'freq': 1, 'amp': 1, 'offset': 0}, {'freq': 1, 'amp': 1, 'offset': 0},
                 {'freq': 1, 'amp': 1, 'offset': 0}, {'freq': 1, 'amp': 1, 'offset': 0},{'freq': 1, 'amp': 1, 'offset': 0}],
-            "vtPeriod": [2, 1.25, 1, 0.5, 1/3, 1/4, 1/5, 1/8, 1/10, 1/20, 1/50, 1/80, 1/100, 1/200, 1/500, 1/800, 1/1000, 1/2000, 1, 1,
+            "awgPeriod": [2, 1.25, 1, 0.5, 1/3, 1/4, 1/5, 1/8, 1/10, 1/20, 1/50, 1/80, 1/100, 1/200, 1/500, 1/800, 1/1000, 1/2000, 1, 1,
                          2, 1, 0.2, 0.1, 0.02, 0.01, 0.002, 0.001, 1, 1, 1, 1, 0.1, 0.1, 0.01, 0.01, 0.001, 0.001, 1, 1,
-                         5, 5, 0.5, 0.5, 0.05, 0.05, 0.005, 0.005, 5, 5, 1, 1, 1, 1, 1],
-            "tStep" : [2/1000, 1.25/1000, 1/1000, 0.5/1000, 1/3000, 1/4000, 1/5000, 1/8000, 1/10000, 1/20000, 1/50000,
-                        1/80000, 1/100000, 1/200000, 1/500000, 1/800000, 1/1000000, 1/2000000, 1/1000, 1/1000,
-                        2/1000, 1/1000, 0.2/1000, 0.1/1000, 0.02/1000, 0.01/1000, 0.002/1000, 0.001/1000,
-                        1/1000, 1/1000, 1/1000, 1/1000, 0.1/1000, 0.1/1000, 0.01/1000, 0.01/1000, 0.001/1000, 0.001/1000, 1/1000, 1/1000,
-                        5/1000, 5/1000, 0.5/1000, 0.5/1000, 0.05/1000, 0.05/1000, 0.005/1000, 0.005/1000, 5/1000, 5/1000,
-                        1/1000, 1/1000, 1/1000, 1/1000, 1/1000]
+                         5, 5, 0.5, 0.5, 0.05, 0.05, 0.005, 0.005, 5, 5, 1, 1, 1, 1, 1]
              }, 60)
     # res = experiments.runMultiParamList(experimentParameters,
-    #                                     {"vtFuncKwargs": [{'startV': 0, 'endV': 0.5}, {'startV': 0, 'endV': 1},
+    #                                     {"awgFuncKwargs": [{'startV': 0, 'endV': 0.5}, {'startV': 0, 'endV': 1},
     #                                                       {'startV' : 0, 'endV': -0.5}, {'startV':0, 'endV':-1}]})
 
 # fresh todo:

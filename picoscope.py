@@ -58,7 +58,8 @@ class Picoscope():
             None
         '''
         self.maxDataBufferSize = 10000  # maximum number of samples each channel's buffer can hold
-        # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
+                                        # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
+        self.minAwgTimeStep = 5e-8      # minimum time step is 50 ns based on the value of ddsPeriod for Picoscope 2405A
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
@@ -87,14 +88,13 @@ class Picoscope():
         '''
         # gather the required parameters from the input dict for convenience
         # todo: make a gatherParams function that iterates through all needed keys and raises an error with all missing values
-        self.vtFunc = params['vtFunc']
-        self.vtFuncArgs = params['vtFuncArgs']
-        self.vtFuncKwargs = params['vtFuncKwargs']
-        self.vtPeriod = params['vtPeriod']
-        self.vtDuration = params['vtDuration']
+        self.awgFunc = params['awgFunc']
+        self.awgFuncArgs = params['awgFuncArgs']
+        self.awgFuncKwargs = params['awgFuncKwargs']
+        self.awgPeriod = params['awgPeriod']
+        self.awgDuration = params['awgDuration']
         self.awgDelay = params['awgDelay']
         self.delayQ = not(self.awgDelay == None)
-        self.tStep = params['tStep']
         self.experimentTime = params['experimentTime']
         self.targetSamples = params['scopeSamples']
         self.channelARange = params['detectorVoltageRange0']
@@ -364,7 +364,7 @@ class Picoscope():
             0 if successful, else -1
         '''
         # skip this whole step if not using AWG, filling in dummy data to return for later operations
-        if self.vtFunc == None:
+        if self.awgFunc == None:
             self.awgTime = np.linspace(0, self.experimentTime, self.scopeSamples)
             self.awg = np.zeros(self.scopeSamples)
             return 0
@@ -374,16 +374,16 @@ class Picoscope():
         # initialize the buffer
         self.generateAWGBuffer()
 
-        # calculate the number of shots needed to run for vtDuration time. Print a warning if the amount exceeds 2e32-1
-        rawShots = math.floor(self.vtDuration / self.vtPeriod)
+        # calculate the number of shots needed to run for awgDuration time. Print a warning if the amount exceeds 2e32-1
+        rawShots = math.floor(self.awgDuration / self.awgPeriod)
         if rawShots > 2e32-1:
             self.awgShots = 0xFFFFFFFF # max value of 32 bit int sets AWG to run continuously
-            self.awgDuration = self.awgShots.value * self.vtPeriod
-            print("AWG Warning: number of voltage function periods implied by vtPeriod and experimentTime settings exceeds " +
+            self.awgDuration = self.awgShots.value * self.awgPeriod
+            print("AWG Warning: number of voltage function periods implied by awgPeriod and experimentTime settings exceeds " +
                   "the amount possible using the AWG (2e32-1). Experiment will with the AWG set to run continuously.")
         else:
             self.awgShots = rawShots
-            self.awgDuration = self.awgShots * self.vtPeriod
+            self.awgDuration = self.awgShots * self.awgPeriod
 
         # set SigGen depending on whether a delay is requested
         if self.delayQ:
@@ -401,14 +401,14 @@ class Picoscope():
                 3,
                 # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
                 ctypes.byref(self.waveformBuffer),
-                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input awgFunc
                 ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
                 ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
                 0,  # # operation = PS2000A_ES_OFF (normal operation)
                 0,
                 # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
                 ctypes.c_uint32(self.awgShots),
-                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by awgPeriod and experimentTime)
                 # setting to max 0xFFFFFFFF runs continuously
                 0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
                 ctypes.c_int32(0),  # triggerType = Rising (Enables simple control with sigGenSoftwareControl())
@@ -431,14 +431,14 @@ class Picoscope():
                 3,
                 # dwellCount (uint32) = ? (uint32)  - how long each step lasts when frequency sweeping. Set to minimum value (3), does not actually matter if not sweeping
                 ctypes.byref(self.waveformBuffer),
-                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input vtFunc
+                # arbitraryWaveform = pointer to uint32 buffer -  voltage samples for the input awgFunc
                 ctypes.c_int32(self.numberOfPoints),  # arbitraryWaveformSize = numberOfPoints (int32)
                 ctypes.c_int32(0),  # sweepType = PS2000A_UP (shouldn't matter if not sweeping)
                 0,  # # operation = PS2000A_ES_OFF (normal operation)
                 0,
                 # indexMode = PS2000A_SINGLE (waveform buffer fully specifies signal, it isn't half of a mirrored signal)
                 ctypes.c_uint32(self.awgShots),
-                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by vtPeriod and experimentTime)
+                # ctypes.c_uint32(self.awgShots), # number of repeats of the signal (implied by awgPeriod and experimentTime)
                 # setting to max 0xFFFFFFFF runs continuously
                 0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
                 ctypes.c_int32(0),  # triggerType = Rising? (hoping this is ignored when using scope trigger)
@@ -456,13 +456,9 @@ class Picoscope():
 
         Args:
             None, requires the following params in the input params dict:
-                vtFunc (callable) : a function which outputs a voltage (in V) for an array of times input (in s)
-                vtPeriod (float) : specify the time range to generate outputs for vtFunc
-                tStep (float) : the timesteps to call vtFunc. Will get rounded to the nearest 50 ns
-                    vtPeriod and tStep specify the times uses in the AWG by np.linspace(0, vtPeriod, vtPeriod / round(tStep) + 1)
-                    Note that minArbitraryWaveformSize <= vtPeriod / round(tStep) + 1 <= maxArbitraryWaveformSize or an error
-                    will be raised
-                *funcArgs, **funcKwargs : additional args and kwargs to pass into vtFunc, if needed
+                awgFunc (callable) : a function which outputs a voltage (in V) for an array of times input (in s)
+                awgPeriod (float) : specify the time range to generate outputs for awgFunc
+                *funcArgs, **funcKwargs : additional args and kwargs to pass into awgFunc, if needed
 
         Returns:
             -1 for error, 0 for normal operation
@@ -488,24 +484,25 @@ class Picoscope():
         :param wavefunc:
         :return:
         '''
-        # calculate number of points implied by vtPeriod/tStep, check it is within the bounds
-        self.numberOfPoints = math.floor(self.vtPeriod / self.tStep) # this isn't saved as a proper Ctype because it needs
-                                                                     # to be signed or unsigned depending on the function using it :(
-        #todo: better error handling here. this prints the waring but will keep running and fail later
-        #   better alternative is to just use the max possible number of points
+        # calculate the number of time points to sample the awgFunc, using the minimum sample period (50 ns) or the
+        #   maximum number of points, whichever smaller
+        self.numberOfPoints = min(math.floor(self.awgPeriod / self.minAwgTimeStep), self.maxBufferSize.value)
+
+        # error check the number of points
         if self.numberOfPoints < self.minBufferSize.value:
             print("functionToArbitraryWaveform: not enough time points specified. Inputs imply " +
                   str(self.numberOfPoints) + " points but AWG requires " + str(self.minBufferSize) +
-                  " points. Consider lowering the value of tStep or increasing vtPeriod.")
+                  " points. awgPeriod value is too low to effectively sample.")
             return -1
         elif self.numberOfPoints > self.maxBufferSize.value:
+            # this condition SHOULD be impossible
             print("functionToArbitraryWaveform: too many time points specified. Inputs imply " +
                   str(self.numberOfPoints) + " points but AWG has a maximum of " + str(self.maxBufferSize.value) +
-                  " points. Consider raising the value of tStep or decreasing vtPeriod.")
+                  " points. It is unclear how this error could have happened, but consider adjusting awgPeriod to fix.")
             return -1
 
-        # calculate frequency based on vtPeriod, use to calculate startDeltaPhase
-        targetFreq = (1 / self.vtPeriod)
+        # calculate frequency based on awgPeriod, use to calculate startDeltaPhase
+        targetFreq = (1 / self.awgPeriod)
         self.startDeltaPhase = ctypes.c_uint32()  # value will be written by next line
 
         # inputs:
@@ -525,9 +522,9 @@ class Picoscope():
         # handle errors
         assert_pico_ok(phaseStatus)
 
-        # create linspace of times, use to output voltages from vtFunc
-        self.awgTime = np.linspace(0, self.vtPeriod, self.numberOfPoints)
-        voltages = self.vtFunc(self.awgTime, *self.vtFuncArgs, **self.vtFuncKwargs) * 1e6  # convert to uV
+        # create linspace of times, use to output voltages from awgFunc
+        self.awgTime = np.linspace(0, self.awgPeriod, self.numberOfPoints)
+        voltages = self.awgFunc(self.awgTime, *self.awgFuncArgs, **self.awgFuncKwargs) * 1e6  # convert to uV
         self.awg = voltages # used for saving later
 
         # convert values to awg buffer sample values
@@ -672,15 +669,6 @@ class Picoscope():
 
 
 
-        # elif self.autoTrigger:
-        #     print('autotriggered')
-        #     destEnd = self.nextSample + numberOfSamples
-        #     sourceEnd = startIndex + numberOfSamples
-        #     self.channelARawData[self.nextSample: destEnd] = self.channelABuffer[startIndex: sourceEnd]
-        #     self.channelBRawData[self.nextSample: destEnd] = self.channelBBuffer[startIndex: sourceEnd]
-        #     self.channelCRawData[self.nextSample: destEnd] = self.channelCBuffer[startIndex: sourceEnd]
-        #     self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[startIndex: sourceEnd]
-        #     self.nextSample += numberOfSamples
 
     def closePicoscope(self):
         '''

@@ -73,8 +73,8 @@ def impedanceTest(params : dict, freqStart : float, freqStop : float, numberOfFr
 
     # overwrite initial parameters list to make this an impedance experiment
     runningParams = copy.copy(params)
-    runningParams['vtFunc'] = pico.testVT
-    runningParams['vtFuncArgs'] = ()
+    runningParams['awgFunc'] = pico.testVT
+    runningParams['awgFuncArgs'] = ()
     runningParams['scopeSamples'] = 10000
     runningParams['vStep'] = [0]
 
@@ -96,11 +96,10 @@ def impedanceTest(params : dict, freqStart : float, freqStop : float, numberOfFr
 
         f = freqs[i]
         print(f)
-        runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
-        runningParams['vtPeriod'] = 1 / f
-        runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
-        runningParams['experimentTime'] = 10 * runningParams['vtPeriod'] + 0.001 # extra 35 ms to account for startup time
-        runningParams['vStepTime'] = [10 * runningParams['vtPeriod']]
+        runningParams['awgFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
+        runningParams['awgPeriod'] = 1 / f
+        runningParams['experimentTime'] = 10 * runningParams['awgPeriod'] + 0.001 # extra 35 ms to account for startup time
+        runningParams['vStepTime'] = [10 * runningParams['awgPeriod']]
 
         if params['save']:
             db.writeParameters(runningParams, i)
@@ -166,8 +165,8 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
 
     # overwrite initial parameters list to make this an impedance experiment
     runningParams = copy.copy(params)
-    runningParams['vtFunc'] = pico.testVT
-    runningParams['vtFuncArgs'] = ()
+    runningParams['awgFunc'] = pico.testVT
+    runningParams['awgFuncArgs'] = ()
     runningParams['vStep'] = [0]
 
     # initialize database
@@ -192,11 +191,10 @@ def impedanceWithAutorange(params : dict, freqStart : float, freqStop : float, n
 
             f = freqs[i]
             print(f)
-            runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
-            runningParams['vtPeriod'] = 1 / f
-            runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
-            runningParams['experimentTime'] = max(10.9 * runningParams['vtPeriod'], 0.0011) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
-            runningParams['vStepTime'] = [max(10 * runningParams['vtPeriod'], 0.001)] # minimum timebase for CA is 34 us
+            runningParams['awgFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
+            runningParams['awgPeriod'] = 1 / f
+            runningParams['experimentTime'] = max(10.9 * runningParams['awgPeriod'], 0.0011) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
+            runningParams['vStepTime'] = [max(10 * runningParams['awgPeriod'], 0.001)] # minimum timebase for CA is 34 us
             runningParams['scopeSamples'] = 10000
 
             if params['save']:
@@ -295,8 +293,8 @@ def multiProcessImpedanceExperiment(params, startFreq, endFreq, nFreqs):
 
     # overwrite initial parameters list to make this an impedance experiment
     runningParams = copy.copy(params)
-    runningParams['vtFunc'] = pico.testVT
-    runningParams['vtFuncArgs'] = ()
+    runningParams['awgFunc'] = pico.testVT
+    runningParams['awgFuncArgs'] = ()
     runningParams['vStep'] = [0]
 
     # initialize database
@@ -321,11 +319,10 @@ def multiProcessImpedanceExperiment(params, startFreq, endFreq, nFreqs):
 
             f = freqs[i]
             print(f)
-            runningParams['vtFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
-            runningParams['vtPeriod'] = 1 / f
-            runningParams['tStep'] = max(5e-8, runningParams['vtPeriod'] / 1000)
-            runningParams['experimentTime'] = max(10.9 * runningParams['vtPeriod'], 0.000160) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
-            runningParams['vStepTime'] = [max(10 * runningParams['vtPeriod'], 0.001)] # CA runs longer to avoid issues with trigger disappearance
+            runningParams['awgFuncKwargs'] = {'freq' : f, 'amp' : 0.01}
+            runningParams['awgPeriod'] = 1 / f
+            runningParams['experimentTime'] = max(10.9 * runningParams['awgPeriod'], 0.000160) # add extra time. to preserve 10kS, min time is 16 ns * 10k = 160 us
+            runningParams['vStepTime'] = [max(10 * runningParams['awgPeriod'], 0.001)] # CA runs longer to avoid issues with trigger disappearance
             # runningParams['scopeSamples'] = 9999
             # set up scope samples to avoid going above 250kS/s
             maxSamples = 2.5e5 * runningParams['experimentTime']
@@ -1072,7 +1069,7 @@ def analyzeImpedance(dat):
         if type(key) == int:
 
             # gather freq, awg, awgtime, trigger, time, and current data
-            period = dat[key]['vtPeriod']
+            period = dat[key]['awgPeriod']
             freq = 1 / period
 
             trig = dat[key]['potentiostatTrigger']
