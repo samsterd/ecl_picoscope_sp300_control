@@ -29,16 +29,21 @@ import experiments as exp
 # Experiment parameters. Will be added anc sorted as they become apparent
 experimentParameters = {
     # Oscilloscope params
-    'awgFunc' : pico.testVT, # Callable, function that can input an array of time values and output voltages at those times
+    'awgFunc' : exp.squareWave, # Callable, function that can input an array of time values and output voltages at those times
+                      # If set to None, the AWG will not be used
     'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
-    'awgFuncKwargs' : {'freq' : 10, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
-    'awgPeriod' : 0.1, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc. That max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
-    'awgDuration': 1, # Duration in seconds for the awgFunction to repeat. If not cleanly divisible by awgPeriod, the duration is rounded down
+    'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'delayQ' : True}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
+    'awgPeriod' : 1, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc.
+                        # Max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
+                        # NOTE: the AWG will stay on its final value, so if awgPeriod does not match the periodicity of the awgFunc
+                        #   or otherwise does not go to 0, the awg will continue outputting the final voltage
+    'awgDuration': 1, # Duration in seconds for the awgFunction to repeat. If not cleanly divisible by awgPeriod, the duration is rounded down,
+                      #    with a minimum value of awgPeriod
     'awgDelay' : 0.5, # Duration in seconds to wait after the trigger is received before starting the AWG.
                       # Exact start time will have an uncertainty of ~5 ms, but the exact time point the awg is started will be saved as awgDelayIndex
-    'vtDuration' : 1, # Duration in seconds for the vtFunction to repeat. If not cleanly divisible by vtPeriod, the duration is rounded down
-    'tStep' : 0.001, # Time step that the vtFunc will be sampled at. Minimum value is also 5e-8 seconds todo: check this
-    #todo: this combination of parameters is very confusing. make this system more intuitive
+                      # Ignored if awgFunc == None
+                      # Technical note: if a delay is used, the first vale of awgFunc will be set to 0, otherwise the awg
+                      #     will output a constant nonzero value at the start
     'experimentTime' : 2, # Duration that the awgFunc will be applied and photodetector / potentiostat measurements are done
     'scopeSamples' : 40000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)

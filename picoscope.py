@@ -93,8 +93,9 @@ class Picoscope():
         self.awgFuncKwargs = params['awgFuncKwargs']
         self.awgPeriod = params['awgPeriod']
         self.awgDuration = params['awgDuration']
-        self.awgDelay = params['awgDelay']
-        self.delayQ = not(self.awgDelay == None)
+        self.awgDelayRaw = params['awgDelay'] # raw input separated to resolve edge case where a delay is input but awgFunc == None
+        self.delayQ = not(self.awgDelayRaw == None) and not(self.awgDelayRaw == 0) and not(self.awgFunc == None)
+        self.awgDelay = 0 if not(self.delayQ) else self.awgDelayRaw
         self.experimentTime = params['experimentTime']
         self.targetSamples = params['scopeSamples']
         self.channelARange = params['detectorVoltageRange0']
@@ -221,6 +222,10 @@ class Picoscope():
 
         # create a flag for triggering delayed AWG
         awgTriggered = False
+
+        # fill in vale for awgDelayIndex if no delay is used
+        if not(self.delayQ):
+            self.awgDelayIndex = 0
 
         # gather data in a loop
         while self.nextSample < self.scopeSamples and not self.autoStopOuter:
@@ -367,6 +372,7 @@ class Picoscope():
         if self.awgFunc == None:
             self.awgTime = np.linspace(0, self.experimentTime, self.scopeSamples)
             self.awg = np.zeros(self.scopeSamples)
+            self.delaySamples = 0
             return 0
         else:
             pass
@@ -375,21 +381,25 @@ class Picoscope():
         self.generateAWGBuffer()
 
         # calculate the number of shots needed to run for awgDuration time. Print a warning if the amount exceeds 2e32-1
-        rawShots = math.floor(self.awgDuration / self.awgPeriod)
+        # Minimum value is 1. If 0 is used, the AWG will ignore triggers and repeat indefinitely since
+        #   sweeps xor shots == 0 when siggen is triggered (see PicoSDK manual)
+        rawShots = max(math.floor(self.awgDuration / self.awgPeriod), 1)
+
         if rawShots > 2e32-1:
             self.awgShots = 0xFFFFFFFF # max value of 32 bit int sets AWG to run continuously
-            self.awgDuration = self.awgShots.value * self.awgPeriod
+            self.awgDurationAdjusted = self.awgShots.value * self.awgPeriod
             print("AWG Warning: number of voltage function periods implied by awgPeriod and experimentTime settings exceeds " +
                   "the amount possible using the AWG (2e32-1). Experiment will with the AWG set to run continuously.")
         else:
             self.awgShots = rawShots
-            self.awgDuration = self.awgShots * self.awgPeriod
+            self.awgDurationAdjusted = self.awgShots * self.awgPeriod
 
         # set SigGen depending on whether a delay is requested
         if self.delayQ:
 
             # delay is requested, so need to use less accurate software trigger
             self.delaySamples = math.floor(self.awgDelay / self.sampleIntervalSeconds)
+
             sigGenStatus = ps.ps2000aSetSigGenArbitrary(
                 self.cHandle,  # scope identifier, int16
                 self.awgOffset,  # offsetVoltage = 0 (int32) - set in generateAWGBuffer
@@ -630,13 +640,10 @@ class Picoscope():
         Returns:
             None. Values copied to data arrays, nextSample, wasCalledBack, and autoStopOuter are updated
         '''
-        # print('callback')
+
         # self.triggered is used to track whether the scope was triggered at any point during the experiment
         #   versus triggered (argument) refers to whether the trigger occurs on this particular callback
         self.triggered = self.triggered or triggered
-
-        # self.triggered = True
-        # self.autoTrigger = time.time() > self.autoTriggerTime
 
         self.wasCalledBack = True
 

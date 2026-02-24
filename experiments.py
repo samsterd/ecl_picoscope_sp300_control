@@ -1215,7 +1215,7 @@ def sinWave(times, freq = 100, amp = 0.1, offset = 0):
     '''
     return amp * np.sin(2 * np.pi * times * freq) + offset
 
-def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5):
+def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5, delayQ = False):
     '''
     Returns a square wave voltage.
 
@@ -1226,6 +1226,8 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
             Note: Positive amp results in starting at the maximum voltage, while a negative amp starts at negative voltage
         offset (float) : value of minimum voltage. Offset +- amp must be within +-2 V
         duty (float) : fraction of wave period spent at the voltage maximum. Must be between 0 and 1
+        delayQ (bool) : will this function be used with a nonzero awgDelay parameter. If so, the first and last values will
+                        be set to 0 to avoid outputting a constant nonzero voltage before and after running
     Returns:
         array : voltages of square wave of length equal to times
     '''
@@ -1242,10 +1244,38 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
         sqBase = np.zeros(len(times))
 
     # next, scale by abs(amp) since the sign was handled previously
-    # finally, add the offset value and return
-    return (abs(amp) * sqBase) + offset
+    # then add the offset value and return
+    output = (abs(amp) * sqBase) + offset
 
-def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1):
+    if delayQ:
+        output[0] = 0
+        output[-1] = 0
+        return output
+    else:
+        return output
+
+def constantProfile(times, voltage : 0):
+    '''
+    Returns a constant profile suitable for applying a constant from the AWG. Based on the guidelines from
+    "Triggering a PicoScope signal generator using the PicoScope API functions", this is a constant array at the selected
+    voltage, with the first value set to 0. The picoscope awg resolving functions SHOULD be able to handle the rest
+
+    Args:
+        times (array) : input time array
+        voltage (float) : value between -2 and 2
+    Returns:
+        array : array at voltage, with first value set to 0
+    '''
+    if voltage < -2 or voltage > 2:
+        raise ValueError("constantProfile: input voltages are outside of AWG range.")
+
+    vArray = voltage * np.ones(len(times))
+    vArray[0] = 0
+    vArray[-1] = 0
+
+    return vArray
+
+def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1, delayQ = False):
     '''
     Returns a random piecewise voltage profile. The time profile is broken into numSteps segments of random length
     Each step is assigned a random voltage within the specified min/max. Within each step the voltage is constant
@@ -1256,6 +1286,8 @@ def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1):
         voltageMin (float) : minimum value of random voltage range. Must be greater than -2
         voltageMax (float) : maximum value of random voltage range. Must be less than 2
             Note: Maximum voltage range is 2. Inputs exceeding any of these bounds will result in error messages
+        delayQ (bool) : will this function be used with a nonzero awgDelay parameter. If so, the first and last values will
+            be set to 0 to avoid outputting a constant nonzero voltage before and after running
     Returns:
         array : voltages of random profile of length equal to times
     '''
@@ -1281,4 +1313,11 @@ def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1):
     # combine the segments and truncate to match length of times
     combinedSegments = np.hstack(tuple(segmentArrs))
 
-    return combinedSegments[:outputLen]
+    output = combinedSegments[:outputLen]
+
+    if delayQ:
+        output[0] = 0
+        output[-1] = 0
+        return output
+    else:
+        return output
