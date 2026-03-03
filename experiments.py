@@ -8,7 +8,7 @@ from matplotlib import pyplot as plt
 import scipy.signal
 import math
 import threading
-import tqdm
+import itertools
 from multiprocessing import Process, Queue, JoinableQueue, set_start_method, shared_memory
 
 # experiment functions will live here. Eventually this will become more systematic
@@ -1041,6 +1041,43 @@ def plotECL(dat : dict):
 
     plt.show()
 
+##################################################################
+########## Generating Parameters ################################
+################################################################
+
+def paramKwargMesh(kwargsList : dict):
+    '''
+    Generates a mesh grid of experiment conditions by generating all combinations of the input lists of parameters. Output
+    can then be used as an argument to runMultiParamList
+    THIS MIGHT NOT BE WHAT I WANT...
+    want to iterate all possible freqs and duty cycles, but amp and offset need to be tied together - do not want to overshoot
+        possible workaround: make this function, and make a wrapper for squareWave where the input is min/max value as a tuple instead
+
+    {'freq' : [1, 5, 10], 'amp' : [
+
+    Args:
+        kwargsList (dict) : a dict where each value is a list of possible values for that specified awgFuncKwarg
+    Returns:
+        list of dicts: a list of dicts of funcKwargs covering all combinations of the inputs
+    '''
+    # NOTE: we are avoiding assuming that dict.keys() and dict.values() are index matched to avoid weird behavior with older python versions
+    #   also it helps me reason about things more explicitly
+    # this first step seems dumb, but it makes everything much more convenient if keys are an iterable
+    keys = list(kwargsList.keys())
+    unwrappedValues = [kwargsList[key] for key in keys]
+    valueMesh = itertools.product(*unwrappedValues)
+
+    experiments = []
+    # the problem: .keys() is not iterable and it is really annoying
+    for exp in valueMesh:
+        expDict = {}
+        for i in range(len(keys)):
+            # we are assuming the valueMesh is in the same order as keys!
+            expDict[keys[i]] = exp[i]
+        experiments.append(copy.copy(expDict))
+
+    return experiments
+
 ##########################################
 ##### analysis for impedance data #########
 ############################################
@@ -1222,9 +1259,9 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
     Args:
         times (array): input time array
         freq (float): frequency of square wave
-        amp (float): difference between minimum and maximum voltage. Must be less than 2
+        amp (float): difference between minimum and maximum voltage / 2. Must be less than 2
             Note: Positive amp results in starting at the maximum voltage, while a negative amp starts at negative voltage
-        offset (float) : value of minimum voltage. Offset +- amp must be within +-2 V
+        offset (float) : constant added to wave to offset the average value from 0
         duty (float) : fraction of wave period spent at the voltage maximum. Must be between 0 and 1
         delayQ (bool) : will this function be used with a nonzero awgDelay parameter. If so, the first and last values will
                         be set to 0 to avoid outputting a constant nonzero voltage before and after running
@@ -1244,7 +1281,7 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
         sqBase = np.zeros(len(times))
 
     # next, scale by abs(amp) since the sign was handled previously
-    # then add the offset value and return
+    # then add the offset value, handle delay, and return
     output = (abs(amp) * sqBase) + offset
 
     if delayQ:
@@ -1253,6 +1290,39 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
         return output
     else:
         return output
+
+def squareWaveByVals(times : np.ndarray, freq = 100, vals : tuple = (0,2), duty = 0.5, delayQ = False):
+    '''
+    A wrapper for squareWave that takes the max and min values as a tuple rather than amplitude and offset. This is helpful
+    for generating meshes of conditions where those values are correlated and shouldn't take all possible values for safety
+
+    Args:
+        times (array): input time array
+        freq (float): frequency of square wave
+        vals (tuple) : 2-tuple of floats describing the values the square wave oscillates between.
+            vals[0] is the starting value, vals[1] is other value
+            abs(max - min) <=2 based on AWG limitations
+        duty (float) : fraction of wave period spent at the voltage maximum. Must be between 0 and 1
+        delayQ (bool) : will this function be used with a nonzero awgDelay parameter. If so, the first and last values will
+                        be set to 0 to avoid outputting a constant nonzero voltage before and after running
+    Returns:
+        array : voltages of square wave of length equal to times
+    '''
+    amp = (vals[0] - vals[1]) / 2 # does this fully work for amp?
+    # vals[0] > vals[1] -> positive amp, start at max (vals[0])
+    # vals[0] < vals[1] -> negative amp, start at min (still vals[0])
+    # it works!
+
+    offset = (vals[0] + vals[1]) / 2
+
+    if 2 * amp > 2:
+        raise ValueError("squareWaveByVals: difference between values (amplitude) must be <=2 due to limitations on the AWG.")
+    if max(vals) > 2 or min(vals) < -2:
+        raise ValueError("squareWaveByVals: values must be bounded by +/-2 due to limitations on the AWG. If greater voltage "
+                         "is needed, use the chronoamperometry voltage setting.")
+
+    return squareWave(times, freq, amp, offset, duty, delayQ)
+
 
 def constantProfile(times, voltage : 0):
     '''
@@ -1264,7 +1334,7 @@ def constantProfile(times, voltage : 0):
         times (array) : input time array
         voltage (float) : value between -2 and 2
     Returns:
-        array : array at voltage, with first value set to 0
+        array : array at voltage, with first and last value set to 0
     '''
     if voltage < -2 or voltage > 2:
         raise ValueError("constantProfile: input voltages are outside of AWG range.")

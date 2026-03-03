@@ -60,6 +60,7 @@ class Picoscope():
         self.maxDataBufferSize = 10000  # maximum number of samples each channel's buffer can hold
                                         # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
         self.minAwgTimeStep = 5e-8      # minimum time step is 50 ns based on the value of ddsPeriod for Picoscope 2405A
+        self.channelDRange = 20         # voltage range for channel D (the trigger channel)
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
@@ -91,7 +92,16 @@ class Picoscope():
         self.awgFunc = params['awgFunc']
         self.awgFuncArgs = params['awgFuncArgs']
         self.awgFuncKwargs = params['awgFuncKwargs']
-        self.awgPeriod = params['awgPeriod']
+
+        if params['awgPeriod'] == None:
+            if 'freq' in self.awgFuncKwargs.keys():
+                self.awgPeriod = 1 / self.awgFuncKwargs['freq']
+            else:
+                raise ValueError("picoscope.loadExperiment: 'awgPeriod' was set to None but 'awgFuncKwargs' does not contain "
+                                 "the key 'freq'. Experiment terminated.")
+        else:
+            self.awgPeriod = params['awgPeriod']
+
         self.awgDuration = params['awgDuration']
         self.awgDelayRaw = params['awgDelay'] # raw input separated to resolve edge case where a delay is input but awgFunc == None
         self.delayQ = not(self.awgDelayRaw == None) and not(self.awgDelayRaw == 0) and not(self.awgFunc == None)
@@ -101,7 +111,7 @@ class Picoscope():
         self.channelARange = params['detectorVoltageRange0']
         self.channelBRange = params['detectorVoltageRange1']
         self.channelCRange = params['potentiostatVoltageRange']
-        self.channelDRange = 20  # hardcoding trigger channel range to max
+        self.channelDRange = self.channelDRange  # hardcoding trigger channel range to max
         self.targetInterval = self.experimentTime / self.targetSamples
         self.resolveSampleInterval()
         self.params = params  # this is redundant but might be helpful for debugging
@@ -535,7 +545,7 @@ class Picoscope():
         # create linspace of times, use to output voltages from awgFunc
         self.awgTime = np.linspace(0, self.awgPeriod, self.numberOfPoints)
         voltages = self.awgFunc(self.awgTime, *self.awgFuncArgs, **self.awgFuncKwargs) * 1e6  # convert to uV
-        self.awg = voltages # used for saving later
+        self.awg = voltages / 1e6 # used for saving later. Divided by 1e6 to convert from uV to V
 
         # convert values to awg buffer sample values
         # formula in SDK is vout = 1uV * (pkToPk / 2) * (sample value / 32767) + offsetVoltage

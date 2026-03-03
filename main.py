@@ -33,7 +33,9 @@ experimentParameters = {
                       # If set to None, the AWG will not be used
     'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
     'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'delayQ' : True}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
-    'awgPeriod' : 1, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc.
+    'awgPeriod' : None, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc.
+                        # If set to None, it will be calculated automatically based on the the frequency of the awgFunc
+                        #   NOTE: this only works if awgFuncKwargs contains the 'freq' key. If it does not, an error is raised
                         # Max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
                         # NOTE: the AWG will stay on its final value, so if awgPeriod does not match the periodicity of the awgFunc
                         #   or otherwise does not go to 0, the awg will continue outputting the final voltage
@@ -161,6 +163,19 @@ def runExperiment(params : dict):
 # if __name__ == '__main__':
 #     # experiments.multiProcessExperimentsMain([experimentParameters])
 #     experiments.multiProcessImpedanceExperiment(experimentParameters, 0, 5, 61)
+
+# example generating script for a large square wave experiment repeated 3 times
+sqKwargList = {'freq' : [1, 5, 10, 20],
+              'vals' : [(2,0), (1.8, 0), (1.5, 0), (1, 2), (1, 1.5), (1.5, 2)],
+              'duty' : [0.1, 0.3, 0.5, 0.7, 0.9],
+              'delayQ' : [True]}
+sqMesh = exp.paramKwargMesh(sqKwargList)
+cKwargList = [{'voltage' : 1}, {'voltage' : 1.5},{'voltage' : 1.8},{'voltage' : 2}]
+funcList = [exp.constantProfile for j in range(len(cKwargList))]+ [exp.squareWaveByVals for i in range(len(sqMesh))]
+kwargList = cKwargList + sqMesh
+# this list will take ~3 hours 15 minutes to run. Run it twice for replicates
+paramList = {"awgFunc" : funcList + funcList,
+             "awgFuncKwargs" : kwargList + kwargList}
 
 #todo: add make range, awg time, etc reasonable for the experiment. lots of artifacting in awg when this isn't adjusted
 

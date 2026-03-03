@@ -757,19 +757,34 @@ def generateVoltageProfile(dat, awgFunc : callable):
 
     return boundedTime, awgVoltages + caVoltage
 
-def interpolateVoltageProfile(awg, awgTime, awgDuration, expTime, caVoltage, finalVoltage = None):
+def awgDelayTime(expTime, awgDelayIndex):
+    '''
+    Gathers the actual time that the AWG was turned on, based on the awgDelayIndex
+
+    Args:
+        expTime (arr) : array of experiment times
+        awgDelayIndex (int) : index of the actual AWG on time returned from the experiment
+    Returns:
+        float : time that the AWG was turned on
+    '''
+
+    return expTime[int(awgDelayIndex)]
+
+def interpolateVoltageProfile(awg, awgTime, awgDuration, awgDelay, expTime, caVoltage, finalVoltage = None):
     '''
     Takes the awg profile and time data, as well as the time data to interpolate to (usually the experimental time),
     and interpolates the awg to all values in the target time array, assuming the awg is periodic
 
     Args:
-        awg (array) : array of voltages applied by the awg, in V
+        awg (array) : array of voltages applied by the awg, in V. NOTE: OLDER DATA IS OUTPUT IN uV. MAKE SURE THIS IS CORRECTED
+                     BEFORE PUTTING IT INTO THIS FUNCTION
         awgTime (array) : array of times for each voltage in awg. len(awg) must equal len(awgTime). Assumed to be in increasing order
         expTime (array) : array of times to interpolate the applied voltage. Assumed to be in the same time unit as
             awgTime and in increasing order. Also assumes expTime[0] >= awgTime[0]
         awgDuration (float) : length of time the AWG is on. When the AWG is off, finalVoltage is used as a constant
+        awgDelay (float) : length of time before the AWG is turned on. Before the AWG is on caVoltage is used
         caVoltage (float) : constant voltage applied by the potentiostat in the Chronoamperometry experiment that runs simultaneous
-            Assumes the CA experiment was applied for the length of expTime
+            Assumes the CA voltage is applied starting at the beginning of the experiment (expTime == 0)
         finalVoltage (float) : final constant voltage that is applied after awgDuration. If not specified, caVoltage is used
     Returns:
         array : array of applied voltages from the potentiostat and AWG, at the time steps specified by expTime
@@ -780,23 +795,69 @@ def interpolateVoltageProfile(awg, awgTime, awgDuration, expTime, caVoltage, fin
     else:
         fv = finalVoltage
 
-    # grab the portion of expTime that occurs before awg turns off
-    awgOnTime = expTime[expTime <= awgDuration]
-
-    # generate the constant voltage profile that occurs after awg turns off
-    awgOffLen = len(expTime) - len(awgOnTime)
-    awgOff = np.full(awgOffLen, fv)
-
     # calculate period of the awg signal
     awgPeriod = awgTime[-1] - awgTime[0]
 
+    # since the AWG will only be on for integer repeats, the actual duration needs to be adjusted based on the periodicity
+    awgShots = math.floor(awgDuration / awgPeriod)
+    awgDurationAdjusted = awgShots * awgPeriod
+
+    # grab the portion of expTime that the AWG is on
+    awgOffTime = awgDelay + awgDurationAdjusted
+    timeAfterDelay = expTime[expTime >= awgDelay]
+    awgOnTime = timeAfterDelay[timeAfterDelay <= awgOffTime]
+
+    # generate the constant voltage profile that occurs before and after awg is on
+    awgPreLen = len(expTime[expTime < awgDelay])
+    awgPostLen = len(expTime[expTime > awgOffTime])
+    awgPre = np.full(awgPreLen, caVoltage)
+    awgPost = np.full(awgPostLen, fv)
+
     # to make the interpolation periodic, take the modulus of the time data with the awg period, then use the
     #   periodic x-axis interpolation
-    modOnTime = awgOnTime % awgPeriod
+    # on time data is zeroed by awgDelay before modulus
+    modOnTime = (awgOnTime - awgDelay) % awgPeriod
 
     awgOn = np.interp(modOnTime, awgTime, awg, period = awgPeriod) + caVoltage
 
-    return np.concatenate((awgOn, awgOff))
+    return np.concatenate((awgPre, awgOn, awgPost))
+
+def calculateEnergy(time, voltage, current):
+    '''
+    Calculates the total electrical energy input during an ECL experiment using the time, current and voltage
+
+    Args:
+        time (arr) : array of experiment times in seconds, assumed to be equally spaced
+        voltage (arr) : array of applied voltages, in volts. NOTE: assumed to be on experiment time axis. Use the output of
+            interpolateVoltageProfile rather than the raw awg output in the data
+        current (arr) : array of measured currents, in amps
+    Returns:
+        float : energy used by experiment, in Joules
+    '''
+    dt = time[1] - time[0]
+
+    cvdt = dt * np.multiply(voltage, current)
+
+    return np.sum(abs(cvdt))
+
+def extrapolateSum(arr, sampleStart, sampleStop):
+    '''
+    Calculates the expected sum of an array based on the sum within a region.
+    Used to extrapolate noise expectation values
+
+    Args:
+        arr (arr) : array to be extrapolated
+        sampleStart (int) : index of array that starts the range to be extrapolated
+        sampleStop (int) : index of array that stops the range to be extrapolated
+    Returns:
+        float : expected sum of input array if has same average sum as the specified range
+    '''
+    arrLen = len(arr)
+    sampleLen = sampleStop - sampleStart
+
+    sampleSum = np.sum(arr[sampleStart:sampleStop])
+
+    return sampleSum * (arrLen / sampleLen)
 
 def movingAvgFilter(arr, windowSize : int = 10):
     '''
