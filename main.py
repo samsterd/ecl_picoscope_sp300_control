@@ -48,6 +48,11 @@ experimentParameters = {
                       #     will output a constant nonzero value at the start
     'experimentTime' : 2, # Duration that the awgFunc will be applied and photodetector / potentiostat measurements are done
     'scopeSamples' : 40000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
+                            # Setting to -1 will result in choosing a number of samples to get a 16 ns timebase
+    'downsamplingRatio': 125, # Number of samples to average before returning to the computer. scopeSamples / downsamplingRatio
+                             # determines the number of points that are recorded in an experiment and what their time resolution is
+                            # Setting to -1 will automatically set the ratio to achieve a 1us/sample (1MHz) rate
+                            # If set to 1 or None, no downsampling is performed
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
                             # and communication bottlenecks from streaming mode (48 kS memory -> need to send data every ~10kS).
                             # NOTE: the combination of time and samples will request a specific sampling interval. The actual
