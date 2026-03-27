@@ -34,6 +34,9 @@
 #           or have samples = -1 for maximum rate
 #           and ratio = -1 for minimum ratio
 #           and failing that implement a check when resolving timebase that also checks and adjusts (with a message) the ratio
+#   problem:
+#       too much downsampling causes trigger to be missed sometimes?
+
 
 import ctypes
 import numpy as np
@@ -41,6 +44,7 @@ import math
 from picosdk.ps2000a import ps2000a as ps
 from picosdk.functions import adc2mV, assert_pico_ok
 import time
+import timeit
 from copy import copy
 
 
@@ -75,10 +79,13 @@ class Picoscope():
         Returns:
             None
         '''
+        # define some constants
         self.maxDataBufferSize = 10000  # maximum number of samples each channel's buffer can hold
                                         # safe guess based on 2405B memory of 48 kS (divide by 3 channels, with overhead)
         self.minAwgTimeStep = 5e-8      # minimum time step is 50 ns based on the value of ddsPeriod for Picoscope 2405A
         self.channelDRange = 20         # voltage range for channel D (the trigger channel)
+        self.autoSampleInterval = 100e-9 # sampling interval to aim for when scopeSamples = -1
+        self.autoDownsamplingInterval = 25e-6 # final sampling interval to achieve with downsampling if downsamplingRatio = -1
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
@@ -133,7 +140,7 @@ class Picoscope():
         self.channelCRange = params['potentiostatVoltageRange']
         self.channelDRange = self.channelDRange  # hardcoding trigger channel range to max
         if self.samplesInput == -1:
-            self.targetInterval = 16e-9
+            self.targetInterval = self.autoSampleInterval
         else:
             self.targetInterval = self.experimentTime / self.samplesInput
         self.resolveSampleInterval()
@@ -179,7 +186,8 @@ class Picoscope():
         self.sampleIntervalSeconds = convertedInterval * unitVals[unitIndex]
 
         # determine number of samples needed to reach the target experimentTime
-        self.scopeSamples = math.floor(self.experimentTime / self.sampleIntervalSeconds)
+        # todo: there is a persistent error when loading data in the buffer related to rounding of the scope samples and downsampling
+        self.scopeSamples = int(math.ceil(self.experimentTime / self.sampleIntervalSeconds))
 
 
     def resolveDownsampling(self):
@@ -188,18 +196,20 @@ class Picoscope():
         Sets values for downsampling ratio and mode, sets experimentSamples and experimentTimeInterval
         '''
 
+
         # calculate the downsampling ratio and number of samples to be saved (experimentSamples) 
         # based on scopeSamples and downsamplingRatio
         if self.downsamplingQ:
 
             if self.downsamplingRatioInput == -1:
-                # automatically resolve so that downsampled time interval is 1 us
-                self.downsamplingRatio = math.floor(1e-6 / self.sampleIntervalSeconds)
-
+                # automatically resolve so that downsampled time interval is 20 us
+                # if the sample interval is greater than 20us, this resolves to 1 and no downsampling is used
+                self.downsamplingRatio = int(math.ceil(self.autoDownsamplingInterval / self.sampleIntervalSeconds))
             else:
                 self.downsamplingRatio = int(self.downsamplingRatioInput)
 
             # resolve based on input value
+            # ceiling is used to prevent later off-by-one errors in the buffer size
             self.experimentSamples = int(math.ceil(self.scopeSamples / self.downsamplingRatio))
 
         else:
@@ -209,16 +219,18 @@ class Picoscope():
 
         # set downsample mode
         if self.downsamplingQ:
-            self.downsamplingMode = 2 # PS2000A_RATIO_MODE_AVERAGE
+            self.downsamplingMode = 4 # PS2000A_RATIO_MODE_AVERAGE
         else:
             self.downsamplingMode = 0 # PS2000A_RATIO_MODE_NONE
 
-        # generate time data (i.e. output x-axis) based on whether downsampling is occurring
-        # first calculate the time interval data is recorded on based on scope sampling ratio and downsampling
-        self.experimentInterval = self.sampleIntervalSeconds * self.downsamplingRatio
+        self.approxExperimentInterval = self.sampleIntervalSeconds * self.downsamplingRatio
 
-        # then generate the time array
-        self.time = np.linspace(0, (self.experimentSamples - 1) * self.experimentInterval, self.experimentSamples)
+        # print a warning if experiment interval is below 25 us
+        if self.approxExperimentInterval < 4e-6:
+            print("Picoscope warning: experiment sampling interval implied by scopeSamples and downsamplingRatio is less "+
+                  "than 4 us. This may cause issues due to data bottlenecking. If the program hangs, the trigger pulse"+
+                  " is being missed due to this issue. Consider running at lower sample rate by lowering scopeSamples or "+
+                  "raising downsamplingRatio.")
 
 
     def openPicoscope(self):
@@ -262,21 +274,33 @@ class Picoscope():
         self.initDataBuffers()
         self.initAWG()
 
+        print("run streaming inputs")
+        print("sample interval: " + str(self.sampleInterval.value))
+        print("sample units: " + str(self.sampleUnits))
+        print("post-trigger samples: " + str(ctypes.c_uint32(self.scopeSamples).value))
+        print("down sample ratio: " + str(self.downsamplingRatio))
+        print("down sample ratio conversion: " + str(ctypes.c_uint32(self.downsamplingRatio).value))
+        print("down sample mode: " + str(self.downsamplingMode))
+        print("overview buffer: " + str(self.dataBufferSize))
+
         # run stream args
         #   handle (int16)
         #   sampleInterval (uint32 pointer byref(self.sampleInterval)) -  target sampling interval. Will get overwritten with actual value after run
         #   sample interval time units (constant self.sampleUnits) - calculated by init helper function
         #   maxPreTriggerSamples (uint32 - 0)
-        #   maxPostTriggerSamples (uint32 - scopeSamples)
+        #   maxPostTriggerSamples (uint32 - scopeSamples (NOT experimentSamples)
         #   autoStop (int16 - 1) - stops streaming when buffer is full
         #   downSampleRatio (uint32) - not using downsampling
         #   downsample ratio mode (constant) - not using downsampling
         #   overviewBufferSize (uint32) - = bufferLth passed to setDataBuffer()
         runStreamingStatus = ps.ps2000aRunStreaming(self.cHandle, ctypes.byref(self.sampleInterval), self.sampleUnits,
-                                                    0, self.scopeSamples, 1, self.downsamplingRatio,
-                                                    self.downsamplingMode, self.dataBufferSize)
+                                                    0, ctypes.c_uint32(self.scopeSamples), 1,
+                                                    ctypes.c_uint32(self.downsamplingRatio),
+                                                    self.downsamplingMode,
+                                                    ctypes.c_uint32(self.dataBufferSize))
 
         assert_pico_ok(runStreamingStatus)
+        print("actual sample interval: " + str(self.sampleInterval.value))
 
 
     def runStream(self):
@@ -302,7 +326,12 @@ class Picoscope():
             self.awgDelayIndex = 0
 
         # gather data in a loop
-        while self.nextSample < self.scopeSamples and not self.autoStopOuter:
+        times = []
+        #todo: optimize the hell out of this. Needs to run in <150 us
+        #   need to convert all class variables to locals
+        #   this includes doing
+        prevTime = time.time()
+        while self.nextSample < self.experimentSamples and not self.autoStopOuter:
 
             self.wasCalledBack = False
             getValsStatus = ps.ps2000aGetStreamingLatestValues(self.cHandle, callbackPointer, None)
@@ -315,6 +344,15 @@ class Picoscope():
                 assert_pico_ok(sgsc)
                 awgTriggered = True
 
+            endTime = time.time()
+            times.append(endTime - prevTime)
+            prevTime = time.time()
+
+        tarr = np.array(times)
+        print("mean callback time: " + str(np.mean(tarr)) + " +- " + str(np.std(tarr)))
+        print("max callback time: " + str(np.max(tarr)))
+        print("callbacks over 1 ms: " + str(np.count_nonzero(tarr > 0.001)))
+        print("mean callback over 1 ms: " + str(np.mean(tarr[tarr > 0.001])))
 
         # stop AWG and collection
         stopStatus = ps.ps2000aStop(self.cHandle)
@@ -325,11 +363,33 @@ class Picoscope():
         maxValStatus = ps.ps2000aMaximumValue(self.cHandle, ctypes.byref(maxADC))
         assert_pico_ok(maxValStatus)
 
+        # get the max downsampling ratio
+        maxRatio = ctypes.c_uint32()
+        maxRatioStatus = ps.ps2000aGetMaxDownSampleRatio(
+            self.cHandle,
+            self.maxBufferSize,
+            ctypes.byref(maxRatio),
+            4,
+            0
+        )
+
+        # generate time data (i.e. output x-axis) based on whether downsampling is occurring
+        # this is calculated after collection because the sampleInterval can be changed by the runStream function to match
+        #   the nearest possible timebase
+        sampleIntervalActual = self.sampleInterval.value * self.sampleUnitVals
+        self.experimentInterval = sampleIntervalActual * self.downsamplingRatio
+        self.time = np.linspace(0, (self.experimentSamples - 1) * self.experimentInterval, self.experimentSamples)
+
         # note that the raw data are 16-bit ints. They need to be converted to 32- or 64- bit to avoid overflows
         self.channelAData = np.array(adc2mV(self.channelARawData.astype(np.int_), self.aRange, maxADC))
         self.channelBData = np.array(adc2mV(self.channelBRawData.astype(np.int_), self.bRange, maxADC))
         self.channelCData = np.array(adc2mV(self.channelCRawData.astype(np.int_), self.cRange, maxADC))
         self.channelDData = np.array(self.channelDRawData.astype(np.int_)) # we want the channel D data in raw ADC to judge the triggering set point
+
+        # catch if delay was missed and put in a filler delay index to avoid later crashes
+        # todo: handle this more elegantly. this means memory is being dropped, which is bad
+        if not hasattr(self, 'awgDelayIndex'):
+            self.awgDelayIndex = -1
 
         return self.channelAData, self.channelBData, self.channelCData, self.channelDData, self.time
 
@@ -371,10 +431,11 @@ class Picoscope():
         #   enable (1)
         #   source (3 - Channel D)
         #   threshold (int16 - will need to play with this a bit)
+        #       for 20V range, 1V is roughly an ADC of 1600
         #   direction 0 (ABOVE)
         #   delay (uint32 - ignored for data collection)
         #   autoTrigger_ms (int16 - 10000s - trigger after 10 s)
-        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 1000, 0, 0, 1000)
+        triggerStatus = ps.ps2000aSetSimpleTrigger(self.cHandle, 1, 3, 5000, 0, 0, 1000)
 
         # error check
         assert_pico_ok(chAStatus)
@@ -440,7 +501,7 @@ class Picoscope():
         '''
         # skip this whole step if not using AWG, filling in dummy data to return for later operations
         if self.awgFunc == None:
-            self.awgTime = np.linspace(0, self.experimentTime, self.scopeSamples)
+            self.awgTime = np.linspace(0, self.experimentTime, self.experimentSamples)
             self.awg = np.zeros(self.scopeSamples)
             self.delaySamples = 0
             return 0
@@ -468,7 +529,7 @@ class Picoscope():
         if self.delayQ:
 
             # delay is requested, so need to use less accurate software trigger
-            self.delaySamples = math.floor(self.awgDelay / self.sampleIntervalSeconds)
+            self.delaySamples = math.floor(self.awgDelay / self.approxExperimentInterval)
 
             sigGenStatus = ps.ps2000aSetSigGenArbitrary(
                 self.cHandle,  # scope identifier, int16
@@ -492,7 +553,7 @@ class Picoscope():
                 # setting to max 0xFFFFFFFF runs continuously
                 0,  # sweeps = 0  (we're doing a set number of shots, not sweeps)
                 ctypes.c_int32(0),  # triggerType = Rising (Enables simple control with sigGenSoftwareControl())
-                ctypes.c_int32(4),# WHY THE FUCK IS IT 4 AND NOT 3?!? NEED TO FIGURE OUT HOW TO ACTUALLY USE CONSTANT ENUMS
+                ctypes.c_int32(4),# Trigger source - software. WHY THE FUCK IS IT 4 AND NOT 3?!? NEED TO FIGURE OUT HOW TO ACTUALLY USE CONSTANT ENUMS
                 1  # extInThreshold  (not using external trigger, doesn't matter)
             )
 
@@ -641,22 +702,33 @@ class Picoscope():
         Returns:
             None. self.dataBufferA/B/C and self.dataA/B/C are saved as class variables
         '''
+        # determine actual buffer size used based on whether downsampling is occurring: memory needs to be split up for
+        # downsampling
+        # if self.downsamplingQ:
+        #     maxBufferSize = math.floor(self.maxDataBufferSize/2)
+        # else:
+        #     maxBufferSize = self.maxDataBufferSize
+
+        maxBufferSize = self.maxDataBufferSize
 
         # determine data buffer size
-        if self.experimentSamples < self.maxDataBufferSize:
+        # todo: allocate based on downsampling ratio and sample interval
+        #       must be enough downsampled memory to hold for multiple
+        if self.experimentSamples < maxBufferSize:
             self.dataBufferSize = self.experimentSamples
             self.approxStreamingInterval = self.dataBufferSize * self.targetInterval
         else:
-            self.dataBufferSize = self.maxDataBufferSize
+            self.dataBufferSize = maxBufferSize
             self.approxStreamingInterval = self.dataBufferSize * self.targetInterval
-            # experiment will fill more than one buffer, therefore check that there is a reasonable amount of time to execute
-            # the copy to memory step. If there isn't, print a warning
-            # according to Picotech, maximum sampling rate for 2205A is 1 MS/s, so check that
-            self.sampleRate = self.experimentSamples / self.experimentTime
-
-            if self.sampleRate > 1e6:
-                print("Warning: requested sampling rate is greater than max specifications. This may result in discontinuous " +
-                      "sampling due to USB and memory bottlenecks. Double check results and consider reducing scopeSamples.")
+            # # experiment will fill more than one buffer, therefore check that there is a reasonable amount of time to execute
+            # # the copy to memory step. If there isn't, print a warning
+            # # according to Picotech, maximum sampling rate for 2205A is 1 MS/s, so check that
+            # self.sampleRate = self.experimentSamples / self.experimentTime
+            # print(self.sampleRate)
+            #
+            # if self.sampleRate > 1e6:
+            #     print("Warning: requested sampling rate is greater than max specifications. This may result in discontinuous " +
+            #           "sampling due to USB and memory bottlenecks. Double check results and consider reducing scopeSamples.")
 
         # allocate data arrays
         self.channelARawData = np.zeros(self.experimentSamples, dtype=ctypes.c_int16)
@@ -670,21 +742,75 @@ class Picoscope():
         self.channelCBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
         self.channelDBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
 
+        # if downsampling, make dummy buffers for the non-downsampled data (we won't be saving it - it gets overwritten
+        # too fast)
+        # if self.downsamplingQ:
+        #     self.channelADummyBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        #     self.channelBDummyBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        #     self.channelCDummyBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+        #     self.channelDDummyBuffer = np.ctypeslib.as_ctypes(np.zeros(self.dataBufferSize, dtype=ctypes.c_int16))
+
         # initialize trackers that will be used by the callback function to copy data from buffers to proper location in data arrays
         # these are based on the streaming example in the picosdk github
         self.nextSample = 0
         self.autoStopOuter = False
         self.wasCalledBack = False
 
+        #todo: use SetDataBuffers when downsampling: the max channel stores raw data, min channel stores the downsampled
+        #   this should fix the memory overwrite issue
         # set data buffer (points the scope to the allocated buffers for fast saving)
+        #   using min returns nothing...
+        # todo: determine whether this is necessary
+
+        # if self.downsamplingQ:
+        #     # args:
+        #     #   chandle (int16)
+        #     #   channel (0-3 - each channel needs its own data buffer)
+        #     #   bufferMax (pointer to array of int16) - holds non-downsampled data. use dummy buffers
+        #     #   bufferMin (pointer to array of int16) - holds downsampled data, use actualdata
+        #     #   bufferLth (int32) - length of buffer arrays (i.e. self.experimentSamples)
+        #     #   segmentIndex (uint32) - not used in streaming mode
+        #     #   mode (constant) - used for downsampling. 0 for none, 4 for average
+        #     # bufferAStatus = ps.ps2000aSetDataBuffers(self.cHandle, 0, ctypes.byref(self.channelABuffer),
+        #     #                                          ctypes.byref(self.channelADummyBuffer), self.dataBufferSize,
+        #     #                                          0, self.downsamplingMode)
+        #     # bufferBStatus = ps.ps2000aSetDataBuffers(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
+        #     #                                          ctypes.byref(self.channelBDummyBuffer), self.dataBufferSize,
+        #     #                                          0, self.downsamplingMode)
+        #     # bufferCStatus = ps.ps2000aSetDataBuffers(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
+        #     #                                          ctypes.byref(self.channelCDummyBuffer), self.dataBufferSize,
+        #     #                                          0, self.downsamplingMode)
+        #     # bufferDStatus = ps.ps2000aSetDataBuffers(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
+        #     #                                          ctypes.byref(self.channelDDummyBuffer),self.dataBufferSize,
+        #     #                                          0, self.downsamplingMode)
+        #     # set dummy buffers
+        #     ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelADummyBuffer),
+        #                                             self.dataBufferSize, 0, 0)
+        #     ps.ps2000aSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBDummyBuffer),
+        #                                             self.dataBufferSize, 0, 0)
+        #     ps.ps2000aSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCDummyBuffer),
+        #                                             self.dataBufferSize, 0, 0)
+        #     ps.ps2000aSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDDummyBuffer),
+        #                                             self.dataBufferSize, 0, 0)
+        #
+        #     # set downsampled buffers
+        #     bufferAStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
+        #                                             self.dataBufferSize, 0, self.downsamplingMode)
+        #     bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
+        #                                             self.dataBufferSize, 0, self.downsamplingMode)
+        #     bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
+        #                                             self.dataBufferSize, 0, self.downsamplingMode)
+        #     bufferDStatus = ps.ps2000aSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
+        #                                             self.dataBufferSize, 0, self.downsamplingMode)
+
+        # else:
         # args:
         #   chandle (int16)
         #   channel (0-3 - each channel needs its own data buffer)
         #   buffer (pointer to array of int16) - location of data
         #   bufferLth (int32) - length of buffer arrays (i.e. self.experimentSamples)
         #   segmentIndex (uint32) - not used in streaming mode
-        #   mode (constant) - used for downsampling. 0 for none, 2 for average
-        #   todo: verify PS2000A_RATIO_MODE_AVERAGE=2
+        #   mode (constant) - used for downsampling. 0 for none, 4 for average
         bufferAStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
                                                 self.dataBufferSize, 0, self.downsamplingMode)
         bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
@@ -693,7 +819,7 @@ class Picoscope():
                                                 self.dataBufferSize, 0, self.downsamplingMode)
         bufferDStatus = ps.ps2000aSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
                                                 self.dataBufferSize, 0, self.downsamplingMode)
-        
+
         # error checking
         assert_pico_ok(bufferAStatus)
         assert_pico_ok(bufferBStatus)
@@ -723,6 +849,8 @@ class Picoscope():
         if autoStop:
             self.autoStopOuter = True
 
+        #todo: consistently getting value errors here where buffer array lengths are not matching
+        #   I THINK this is a issue with rounding - buffer size is getting rounded vs the streaming length?
         # save data in two cases: was previously triggered or triggered in this callback
         if self.triggered and not triggered:
             destEnd = self.nextSample + numberOfSamples

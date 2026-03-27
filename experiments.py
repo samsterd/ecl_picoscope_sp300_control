@@ -9,7 +9,9 @@ import scipy.signal
 import math
 import threading
 import itertools
+import tqdm
 from multiprocessing import Process, Queue, JoinableQueue, set_start_method, shared_memory
+
 
 # experiment functions will live here. Eventually this will become more systematic
 
@@ -469,8 +471,9 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
     pot = bio.Biologic(firstExp)
 
     # enter experiment loop
-    for exp in paramList:
+    for i in tqdm.tqdm(range(len(paramList))):
 
+        exp = paramList[i]
         # need to add the experimentNumber value to the experiment parameters for saving purposes
         exp['experimentNumber'] = expNumber
         exp['timeCollected'] = time.time()
@@ -495,8 +498,9 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
             multiQ.task_done()
             break
 
-        # mark flag as received, start experiment
+        # mark flag as received, wait 100 ms to give the picoscope time to start, then start experiment
         multiQ.task_done() # unclear if the order this is done matters
+
         pot.runExperimentWithoutData()
 
         # wait for data to enter the queue
@@ -524,7 +528,7 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
         # signal that data is done processing
         multiQ.task_done()
 
-        if downTime > 0:
+        if downTime > 0 and i < len(paramList) - 1:
             time.sleep(downTime)
 
         expNumber += 1
@@ -1324,7 +1328,7 @@ def squareWaveByVals(times : np.ndarray, freq = 100, vals : tuple = (0,2), duty 
     return squareWave(times, freq, amp, offset, duty, delayQ)
 
 
-def constantProfile(times, voltage : 0):
+def constantProfile(times, voltage = 0, freq = 0):
     '''
     Returns a constant profile suitable for applying a constant from the AWG. Based on the guidelines from
     "Triggering a PicoScope signal generator using the PicoScope API functions", this is a constant array at the selected
