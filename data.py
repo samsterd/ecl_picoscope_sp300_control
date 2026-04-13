@@ -673,7 +673,8 @@ def plotData(dat : dict, index : int, caV : float = 0.):
     c = exp['potentiostatCurrent']
     awgt = exp['awgTime']
     awg = exp['awg']
-    v = interpolateVoltageProfile(awg, awgt, t[-1], t, caV)
+    awgDelay = awgDelayTime(t, exp['awgDelayIndex'])
+    v = interpolateVoltageProfile(awg, awgt, t[-1], awgDelay, t, caV)
 
     fig, ax = plt.subplots(2, 2)
     ax[0,0].plot(t, da)
@@ -686,7 +687,7 @@ def plotData(dat : dict, index : int, caV : float = 0.):
     ax[1,1].set_title('Current (A)')
     plt.show()
 
-def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tuple):
+def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tuple, supTitle : str = ''):
     '''
     Generates a simple 2 by 2 panelled plot of experimental data at the specified experiment index using user input keys
 
@@ -696,6 +697,7 @@ def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tup
         xKeys : tuple of keys for x-axes. Must be length 4
         yKeys : tuple of keys for y-axes. Must be length 4
         titles : tuple of titles for plots. Must be length 4
+        supTitle (str) : overall title of full plot
     Returns:
         None. Shows plot
     '''
@@ -710,6 +712,7 @@ def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tup
         ax[i >> 1, i & 1].plot(exp[xKeys[i]], exp[yKeys[i]])
         ax[i >> 1, i & 1].set_title(titles[i])
 
+    plt.suptitle(supTitle)
     plt.show()
 
 ################################################################################
@@ -770,7 +773,7 @@ def awgDelayTime(expTime, awgDelayIndex):
 
     return expTime[int(awgDelayIndex)]
 
-def interpolateVoltageProfile(awg, awgTime, awgDuration, awgDelay, expTime, caVoltage, finalVoltage = None):
+def interpolateVoltageProfile(awg, awgTime, awgDuration, awgDelay, expTime, caVoltage = 0, finalVoltage = None):
     '''
     Takes the awg profile and time data, as well as the time data to interpolate to (usually the experimental time),
     and interpolates the awg to all values in the target time array, assuming the awg is periodic
