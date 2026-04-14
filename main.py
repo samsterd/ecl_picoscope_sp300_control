@@ -33,6 +33,9 @@ experimentParameters = {
                       # If set to None, the AWG will not be used
     'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
     'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'delayQ' : True}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
+    'awgSamples' : -1, # Number of sample points to generate for the AWG function within each period
+                        # setting to -1 will use the maximum number possible
+                        # Note that the minimum period for the AWG DAC is 5 ns, so the AWG period / awg samples should be >= 5 ns
     'awgPeriod' : None, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc.
                         # If set to None, it will be calculated automatically based on the the frequency of the awgFunc
                         #   NOTE: this only works if awgFuncKwargs contains the 'freq' key. If it does not, an error is raised
@@ -47,20 +50,13 @@ experimentParameters = {
                       # Technical note: if a delay is used, the first vale of awgFunc will be set to 0, otherwise the awg
                       #     will output a constant nonzero value at the start
     'experimentTime' : 2, # Duration that the awgFunc will be applied and photodetector / potentiostat measurements are done
-    'scopeSamples' : 40000, # Number of voltage points that will be collected by the oscilloscope during experimentTime
-                            # Setting to -1 will result in choosing a number of samples to get a 16 ns timebase
-    'downsamplingRatio': 125, # Number of samples to average before returning to the computer. scopeSamples / downsamplingRatio
-                             # determines the number of points that are recorded in an experiment and what their time resolution is
-                            # Setting to -1 will automatically set the ratio to achieve a 1us/sample (1MHz) rate
-                            # If set to 1 or None, no downsampling is performed
-    'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
-                            # and communication bottlenecks from streaming mode (48 kS memory -> need to send data every ~10kS).
-                            # NOTE: the combination of time and samples will request a specific sampling interval. The actual
-                            # sampling interval will be determined by communication speeds in streaming mode. The actual value will be saved
-                            # NOTE: streaming maximum data transfer rate is 1MS/s, or 250kS per channel, leading to a minimum
-                            #   timestep of 4 us. Empirically, the software struggles below 25 us
+    'requestedSampleInterval' : 1, # Time interval between measurements, in ns, BEFORE downsampling. Will be rounded down to
+                                 # to match an available time base for the Picoscope. Setting to -1 will go to a default value (currently 1)
+    'requestedDownsampleInterval': 1000, # Time interval between downsampled measurements. Will be rounded up to be an
+                                           # integer multiple of the actual time interval. Setting to -1 will go to a default value (currently 20000)
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
     'detectorVoltageRange1' : 2, # maximum voltage expected on photodetector 1 (Channel B)
+    # todo: add a minimum voltage so that an offset can be added?
     'potentiostatVoltageRange' : 1, # maximum voltage expected on the potentiostat output (Channel C)
                                     # Allowed values are 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20
                                     # Improper inputs will be rounded up to the nearest allowed value
