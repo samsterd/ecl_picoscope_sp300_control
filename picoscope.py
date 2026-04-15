@@ -43,6 +43,7 @@
 #           absolute numbers may need adjustment!
 #       -initAWG: test meaning of a few parameters (cycles on trigger, enabled on apply)
 #       -generateAWGBuffer: test
+#           test constant profile still works!
 #       -initDataBuffers: delete commented out code once tested
 #           potential source of issues - I do not fully understand what the action option means
 #       xstreamingCallback: delete once everything is tested
@@ -120,7 +121,7 @@ class Picoscope():
         # define some device
         self.maxDataBufferSize = 400e6  # maximum number of samples each channel's buffer can hold
                                         # safe guess based on 2GS memory (divide by 4 channels, with overhead)
-        self.bitResolution = enums.PICO_DEVICE_RESOLUTION["PICO_DR_10BIT"]#enums.PICO_DEVICE_RESOLUTION["PICO_DR_8BIT"] # we will run in 10-bit mode for speed. If more speed is needed, switch to 8-bit mode
+        self.bitResolution = enums.PICO_DEVICE_RESOLUTION["PICO_DR_8BIT"]#enums.PICO_DEVICE_RESOLUTION["PICO_DR_8BIT"] # we will run in 10-bit mode for speed. If more speed is needed, switch to 8-bit mode
         self.coupling = 1 # options are 0 (1Mohm AC), 1 (1Mohm DC), and 50 (50 ohm DC)
 
         # todo: figure out what actual value is
@@ -160,7 +161,7 @@ class Picoscope():
                                                 ctypes.byref(self.bufferSizeStep)
                                                 )
         awgVoltsStatus = ps.psospaSigGenLimits(self.cHandle,
-                                                enums.PICO_SIGGEN_PARAMETER["PICO_SIGGEN_OUTPUT_VOLTS"],
+                                                enums.PICO_SIGGEN_PARAMETER["PICO_SIGGEN_PARAM_OUTPUT_VOLTS"],
                                                 ctypes.byref(self.minAWGVolts),
                                                 ctypes.byref(self.maxAWGVolts),
                                                 ctypes.byref(self.awgVoltsStep)
@@ -201,21 +202,25 @@ class Picoscope():
             awgTargetSamples = math.floor(self.awgPeriod / 5e-9)
         else:
             awgTargetSamples = awgRequestedSamples
+
         # next make sure target samples is within limits
         if awgTargetSamples > self.maxBufferSize.value:
             if awgRequestedSamples != -1:
                 # only print warnings for non-default inputs
                 print("Warning: requested number of AWG samples is greater than the max allowed by the hardware (" +
                   self.maxBufferSize.value + "). AWG samples set to this value.")
-            self.awgSamples = self.maxBufferSize.value
+            self.awgSamples = int(self.maxBufferSize.value)
+
         elif awgTargetSamples < self.minBufferSize.value:
             if awgRequestedSamples != -1:
                 # only print warnings for non-default inputs
                 print("Warning: requested number of AWG samples is less than the min allowed by the hardware (" +
                   self.minBufferSize.value + "). AWG samples set to this value.")
-            self.awgSamples = self.minBufferSize.value
+            self.awgSamples = int(self.minBufferSize.value)
+
         else:
-            self.awgSamples = awgTargetSamples
+            self.awgSamples = awgTargetSamples # should be an int since targetSamples is floored
+
         if self.awgPeriod / self.awgSamples < 5e-9:
             # NOTE: this should not be possible if inputs are -1
             print("Warning: requested AWG sampling rate is too fast (awgPeriod/awgSamples < 5e-9). Consider lowering awgSamples.")
@@ -262,40 +267,31 @@ class Picoscope():
         self.sampleIntervalSeconds = ctypes.c_double()
         self.sampleIntervalUnit = enums.PICO_TIME_UNITS["PICO_S"]
 
-        # if default value (-1) is input, set to minimum possible sample interval
-        if self.requestedSampleInterval == -1:
-            # args: cHandle
-            # channel enabled bitfield
-            # pointer to timebase
-            # pointer to time interval
-            # bit resolution
-            sampleIntervalStatus = ps.psospaGetMinimumTimbaseStateless(
-                self.cHandle,
-                self.channelEnabledBitfield,
-                ctypes.byref(self.timebase),
-                ctypes.byref(self.sampleIntervalSeconds),
-                self.bitResolution)
-
+        # this handles the default (-1) and when the input is below the streaming minimum of 4ns
+        if self.requestedSampleInterval < 4:
+            requestedInterval = ctypes.c_double(4.0e-9)
         # else find the nearest possible value, rounding down
         else:
             # first properly format the requested interval (convert from ns to s and make sure its a double)
             requestedInterval = ctypes.c_double(self.requestedSampleInterval / 1e9)
-            # args: cHandle
-            # channel enabled bitfield
-            # requested interval (double, seconds)
-            # round faster (uint8, 1 for faster, 0 for slower)
-            # bit resolution
-            # pointer to timebase
-            # pointer to time interval
-            sampleIntervalStatus = ps.psospaNearestSampleIntervalStateless(
-                self.cHandle,
-                self.channelEnabledBitfield,
-                requestedInterval,
-                ctypes.c_uint8(1),
-                self.bitResolution,
-                ctypes.byref(self.timebase),
-                ctypes.byref(self.sampleIntervalSeconds)
-            )
+
+        # find nearest sample interval to requested interval
+        # args: cHandle
+        # channel enabled bitfield
+        # requested interval (double, seconds)
+        # round faster (uint8, 1 for faster, 0 for slower)
+        # bit resolution
+        # pointer to timebase
+        # pointer to time interval
+        sampleIntervalStatus = ps.psospaNearestSampleIntervalStateless(
+            self.cHandle,
+            self.channelEnabledBitfield,
+            requestedInterval,
+            1,
+            self.bitResolution,
+            ctypes.byref(self.timebase),
+            ctypes.byref(self.sampleIntervalSeconds)
+        )
 
         assert_pico_ok(sampleIntervalStatus)
         # sample interval is rounded for readability. Since the max sample rate is 5 GS/s, minimum value should be 0.2 ns/sample
@@ -308,7 +304,7 @@ class Picoscope():
             self.rawDownsampleInterval = self.requestedDownsampleInterval
 
         # error handling: print a warning if downsampling interval < sampling interval
-        if self.rawDownSampleInterval < self.sampleInterval:
+        if self.rawDownsampleInterval < self.sampleInterval:
             print("resolveSampling Warning: requested downsampling interval (" + str(self.rawDownsampleInterval) +
                   " ns) is shorter than the sampling interval (" + str(self.sampleInterval) +
                   " ns). A downsampling ratio of 1 will be used.")
@@ -316,7 +312,12 @@ class Picoscope():
 
         # calculate actual values, rounding down to the nearest int
         else:
-            self.downsampleRatio = math.floor(self.rawDownsampleInterval / self.sampleInterval)
+            self.downsampleRatio = max(math.floor(self.rawDownsampleInterval / self.sampleInterval), 1)
+
+        # error handling: sample interval constraints are longer when there isn't downsampling
+        if self.downsampleRatio == 1 and self.sampleInterval < 50:
+            print("Warning: requested sample interval of " + str(self.sampleInterval) + " ns may be too fast for " +
+                  "USB streaming without downsampling. Experiment will run, but data may be discontinuous or missing.")
 
         # calculate actual downsample interval, in ns, for readability
         self.downsampleInterval = self.sampleInterval * self.downsampleRatio
@@ -342,7 +343,7 @@ class Picoscope():
             self.awgDelayIndex = 0
         else:
             #todo: check if this should be samples or downsamples
-            self.awgTriggerSamples = math.floor(self.awgDelay / (self.sampleIntervalSeconds * self.downsampleRatio))
+            self.awgTriggerSamples = math.floor(self.awgDelay / (self.sampleIntervalSeconds.value * self.downsampleRatio))
             # note: not putting in a filler value for awgDelayIndex. This is added during streaming
             #   and if that fails, a -1 flag is added afterward
 
@@ -452,8 +453,6 @@ class Picoscope():
                                            self.bitResolution,
                                            None) # no need for power details
 
-        print(self.openUnit)
-        print(self.cHandle)
         # Print plain explanations of errors
         if self.cHandle.value == -1:
             print("Picoscope failed to open. Check that it is plugged in and not in use by another program.")
@@ -477,12 +476,16 @@ class Picoscope():
         self.initDataBuffers()
         self.initAWG()
 
+        print(self.sampleIntervalSeconds.value)
+        print(self.numberOfDownsamples)
+        print(self.downsampleInterval)
+
         # run stream args
         #   handle (int16): self.cHandle
         #   sample interval (double): self.sampleIntervalSeconds
         #   sample interval units (enum) : self.sampleIntervalUnit
         #   max pre trigger samples (uint64) : 0
-        #   max post trigger samples (uint64) : self.numberOfSamples
+        #   max post trigger samples (uint64) : self.numberOfDownsamples
         #   autoStop (int16) : 1 (yes, stop at max samples)
         #   downsample ratio (uint64) : self.downsampleRatio
         #   downsample mode (enum) : 4 (enums.PICO_RATIO_MODE[PICO_RATIO_MODE_AVERAGE])
@@ -499,7 +502,11 @@ class Picoscope():
 
         assert_pico_ok(runStreamingStatus)
         # todo: verify that sampleInterval doesn't get messed up by rounding errors
-        print("actual sample interval: " + str(self.sampleInterval.value))
+        # todo: here's the problem: sampleInterval seems to change despite using get nearest sample interval
+        #       check that that function is working as intended. check that the output is being properly assigned
+        #       if we can't rely on that: need to recalculate numberOfDownsamples, use that to inform the streaming loop,
+        #           and then cut off unfilled data. If resulting number of downsamples is larger than the buffers... allocate more?
+        print("actual sample interval: " + str(self.sampleIntervalSeconds.value))
 
 
     def runStream(self):
@@ -534,6 +541,9 @@ class Picoscope():
         awgTriggered = False
         awgTriggerIndex = 0
 
+        # create flag to track if memory overflow issues occurred during collection
+        self.memoryOverflow = False
+
         collectedSamples = 0
 
         # gather data in a loop
@@ -542,16 +552,20 @@ class Picoscope():
             # args:
             #   cHandle
             #   pointer to streaming data info structs : streamData
-            #   nStreamingDataInfos (uint64) : number of structs in streamData list (3?)
+            #   nStreamingDataInfos (uint64) : number of structs in streamData list (4?)
             #       todo: verify this number, its a little weird that the example only has 1
             #   pointer to trigger info struct : streamTrigger
-            getValsStatus = ps.psospaGetStreamingLatestValues(self.cHandle, ctypes.byref(streamData), 3,
+            getValsStatus = ps.psospaGetStreamingLatestValues(self.cHandle, ctypes.byref(streamData), 4,
                                                               ctypes.byref(streamTrigger))
 
-            # todo: check for full buffers, just in case
+            # check for memory overflow using error codes on return
+            # 268435464: "Pico Device Memory Overflow: The memory on board the device has overflowed."
+            if getValsStatus == 268435464:
+                self.memoryOverflow = True
 
             # update index, check for awg trigger
             collectedSamples = collectedSamples + streamData[0].noOfSamples
+            # print(collectedSamples)
 
             if self.delayQ and (not awgTriggered) and (collectedSamples >= self.awgTriggerSamples):
                 # fill in software trigger, make sure the awg trigger index is right
@@ -574,10 +588,10 @@ class Picoscope():
         self.time = np.linspace(0, self.correctedExperimentTime, self.numberOfDownsamples)
 
         # note that the raw data are 16-bit ints. They need to be converted to 32- or 64- bit to avoid overflows
-        self.channelAData = np.array(adc2mVV2(self.channelARawData.astype(np.int_), self.aRangeMax, maxADC))
-        self.channelBData = np.array(adc2mVV2(self.channelBRawData.astype(np.int_), self.bRangeMax, maxADC))
-        self.channelCData = np.array(adc2mVV2(self.channelCRawData.astype(np.int_), self.cRangeMax, maxADC))
-        self.channelDData = np.array(self.channelDRawData.astype(np.int_)) # we want the channel D data in raw ADC to judge the triggering set point
+        self.channelAData = np.array(adc2mVV2(self.channelABuffer, self.aRangeMax.value, maxADC))
+        self.channelBData = np.array(adc2mVV2(self.channelBBuffer, self.bRangeMax.value, maxADC))
+        self.channelCData = np.array(adc2mVV2(self.channelCBuffer, self.cRangeMax.value, maxADC))
+        self.channelDData = np.array(self.channelDBuffer) # we want the channel D data in raw ADC to judge the triggering set point
 
         # catch if delay was missed and put in a filler delay index to avoid later crashes
         if not hasattr(self, 'awgDelayIndex'):
@@ -604,10 +618,11 @@ class Picoscope():
         self.cRangeMax = self.rangeMax(self.channelCRange)
         self.dRangeMax = self.rangeMax(self.channelDRange)
 
-        self.aRangeMin = -1 * self.aRangeMax
-        self.bRangeMin = -1 * self.bRangeMax
-        self.cRangeMin = -1 * self.cRangeMax
-        self.dRangeMin = -1 * self.dRangeMax
+        # min = -1 * max. there's probably a more elegant way to do this but...
+        self.aRangeMin = ctypes.c_int64(-1 * self.aRangeMax.value)
+        self.bRangeMin = ctypes.c_int64(-1 * self.bRangeMax.value)
+        self.cRangeMin = ctypes.c_int64(-1 * self.cRangeMax.value)
+        self.dRangeMin = ctypes.c_int64(-1 * self.dRangeMax.value)
 
         # set channel args:
         #   handle (int16): self.cHandle
@@ -642,7 +657,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (uint32 - ignored for data collection)
         #   autoTrigger_us (int32 - 10000s - trigger after 2 s)
-        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 5000, 0, 0, ctypes.c_uint32(2000000))
+        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 5000, 0, 0, ctypes.c_uint32(2000))
 
         assert_pico_ok(triggerStatus)
 
@@ -1076,12 +1091,6 @@ class Picoscope():
             None. self.dataBufferA/B/C and self.dataA/B/C are saved as class variables
         '''
 
-        # allocate data arrays
-        self.channelARawData = np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16)
-        self.channelBRawData = np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16)
-        self.channelCRawData = np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16)
-        self.channelDRawData = np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16)
-
         # allocate streaming buffers
         self.channelABuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
         self.channelBBuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
@@ -1105,13 +1114,13 @@ class Picoscope():
                                                0, 4, enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"])
         bufferBStatus = ps.psospaSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
         bufferCStatus = ps.psospaSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
         bufferDStatus = ps.psospaSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
 
         assert_pico_ok(bufferAStatus)
         assert_pico_ok(bufferBStatus)
