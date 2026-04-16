@@ -232,6 +232,7 @@ class Picoscope():
         self.requestedDownsampleInterval = params['requestedDownsampleInterval']
         # self.downsampleQ = (self.downsampleRatioInput != 1 and self.downsampleRatioInput != None)
         self.experimentTime = params['experimentTime']
+        self.awgStopQ = (self.awgDelay + self.awgDuration < self.experimentTime)
         self.requestedSampleInterval = params['requestedSampleInterval']
         self.channelARange = params['detectorVoltageRange0']
         self.channelBRange = params['detectorVoltageRange1']
@@ -341,9 +342,13 @@ class Picoscope():
         if not(self.delayQ):
             self.awgTriggerSamples = 0
             self.awgDelayIndex = 0
+            # we do need to calculate how many samples to run before stopping the AWG if it is stopping early
+            if self.awgStopQ:
+                self.awgRunSamples = math.floor(self.awgDuration / (self.sampleIntervalSeconds.value * self.downsampleRatio))
         else:
             #todo: check if this should be samples or downsamples
             self.awgTriggerSamples = math.floor(self.awgDelay / (self.sampleIntervalSeconds.value * self.downsampleRatio))
+            self.awgRunSamples = math.floor(self.awgDuration / (self.sampleIntervalSeconds.value * self.downsampleRatio))
             # note: not putting in a filler value for awgDelayIndex. This is added during streaming
             #   and if that fails, a -1 flag is added afterward
 
@@ -476,10 +481,6 @@ class Picoscope():
         self.initDataBuffers()
         self.initAWG()
 
-        print(self.sampleIntervalSeconds.value)
-        print(self.numberOfDownsamples)
-        print(self.downsampleInterval)
-
         # run stream args
         #   handle (int16): self.cHandle
         #   sample interval (double): self.sampleIntervalSeconds
@@ -495,7 +496,7 @@ class Picoscope():
             self.sampleIntervalUnit,
             ctypes.c_uint64(0),
             ctypes.c_uint64(self.numberOfSamples),
-            ctypes.c_int16(1),
+            ctypes.c_int16(0),
             ctypes.c_uint64(self.downsampleRatio),
             4
             )
@@ -544,10 +545,31 @@ class Picoscope():
         # create flag to track if memory overflow issues occurred during collection
         self.memoryOverflow = False
 
+        if self.awgStopQ:
+            if self.delayQ:
+                # if we are delaying the start of the AWG, put in a filler value for now
+                # this will get updated to the more precise timing once the AWG trigger is sent
+                awgStopIndex = self.awgTriggerSamples + self.awgRunSamples
+            else:
+                # awg is running without a delay so stopping is based only on the number of samples it is running for
+                awgStopIndex = self.awgRunSamples
+
         collectedSamples = 0
 
+        # streaming loop needs to be very fast. We can get some performance gains by converting all class variables to
+        #   local variables. The ones that are altered during collection will be re-saved after the loop
+        numberOfDownsamples = self.numberOfDownsamples
+        cHandle = self.cHandle
+        memoryOverflow = self.memoryOverflow # UPDATE THIS ONE AFTER LOOP
+        delayQ = self.delayQ
+        awgTriggerSamples = self.awgTriggerSamples
+        triggerType = enums.PICO_SIGGEN_TRIG_TYPE["PICO_SIGGEN_RISING"]
+        awgRunSamples = self.awgRunSamples
+        awgStopQ = self.awgStopQ
+
+
         # gather data in a loop
-        while collectedSamples < self.numberOfDownsamples:
+        while collectedSamples < numberOfDownsamples:
 
             # args:
             #   cHandle
@@ -555,28 +577,45 @@ class Picoscope():
             #   nStreamingDataInfos (uint64) : number of structs in streamData list (4?)
             #       todo: verify this number, its a little weird that the example only has 1
             #   pointer to trigger info struct : streamTrigger
-            getValsStatus = ps.psospaGetStreamingLatestValues(self.cHandle, ctypes.byref(streamData), 4,
+            getValsStatus = ps.psospaGetStreamingLatestValues(cHandle, ctypes.byref(streamData), 4,
                                                               ctypes.byref(streamTrigger))
 
             # check for memory overflow using error codes on return
             # 268435464: "Pico Device Memory Overflow: The memory on board the device has overflowed."
             if getValsStatus == 268435464:
-                self.memoryOverflow = True
+                memoryOverflow = True
 
             # update index, check for awg trigger
             collectedSamples = collectedSamples + streamData[0].noOfSamples
             # print(collectedSamples)
 
-            if self.delayQ and (not awgTriggered) and (collectedSamples >= self.awgTriggerSamples):
-                # fill in software trigger, make sure the awg trigger index is right
-                awgTriggerStatus = ps.psospaSigGenSoftwareTriggerControl(self.cHandle,
-                                                                         enums.PICO_SIGGEN_TRIG_TYPE["PICO_SIGGEN_RISING"])
+            if delayQ and (not awgTriggered) and (collectedSamples >= awgTriggerSamples):
+                # unpause the AWG and fire the software trigger
+                awgRestartStatus = ps.psospaSigGenRestart(cHandle)
+                assert_pico_ok(awgRestartStatus)
+                awgTriggerStatus = ps.psospaSigGenSoftwareTriggerControl(cHandle, triggerType)
+                assert_pico_ok(awgTriggerStatus)
+
+                # save parameters and set some flags
+                awgDelayIndex = copy(collectedSamples)
                 awgTriggered = True
-                awgTriggerIndex = copy(collectedSamples)
+                awgStopIndex = awgDelayIndex + awgRunSamples
+
+
+            if awgStopQ and collectedSamples >= awgStopIndex:
+                # need to pause the AWG or it will apply a constant voltage equal to the last value applied
+                #   for the rest of the experiment
+                stopStatus = ps.psospaSigGenPause(cHandle)
+                assert_pico_ok(stopStatus)
 
         # stop streaming
-        stopStatus = ps.psospaStop(self.cHandle)
+        stopStatus = ps.psospaStop(cHandle)
         assert_pico_ok(stopStatus)
+
+        # update some class variables that were made local for the streaming loop
+        self.memoryOverflow = memoryOverflow
+        if delayQ:
+            self.awgDelayIndex = awgDelayIndex
 
         # get ADC limits
         maxADC = ctypes.c_int16()
@@ -596,6 +635,9 @@ class Picoscope():
         # catch if delay was missed and put in a filler delay index to avoid later crashes
         if not hasattr(self, 'awgDelayIndex'):
             self.awgDelayIndex = -1
+
+        if self.memoryOverflow:
+            print("warning: memory overflow occurred")
 
         return self.channelAData, self.channelBData, self.channelCData, self.channelDData, self.time
 
@@ -745,17 +787,20 @@ class Picoscope():
             0 if successful, else -1
         '''
 
-        # skip this whole step if not using AWG, filling in dummy data to return for later operations
+        # resolve certain parameters based on awgFunc input
         if self.awgFunc == None:
+            # skip this whole step if not using AWG, filling in dummy data to return for later operations
             self.awgTime = np.linspace(0, self.correctedExperimentTime, self.numberOfDownsamples)
             self.awg = np.zeros(self.numberOfDownsamples)
             self.delaySamples = 0
             return 0
+        # if using AWG, resolve what wave type to use
+        elif self.awgFunc == 'picoSine':
+            self.awgWaveType = 0x00000011
+        elif self.awgFunc == 'picoSquare':
+            self.awgWaveType = 0x00000012
         else:
-            pass
-
-        self.setAWGBuffer()
-        self.setAWGFreq()
+            self.awgWaveType = 0x10000000
 
         # calculate the number of shots needed to run for awgDuration time. Print a warning if the amount exceeds 2e64-1 (unlikely)
         rawShots = max(math.floor(self.awgDuration / self.awgPeriod), 1)
@@ -769,7 +814,9 @@ class Picoscope():
             self.awgShots = rawShots
             self.awgDurationAdjusted = self.awgShots * self.awgPeriod
 
-        # set SigGen depending on whether a delay is requested
+        # set up sig gen trigger depending on whether AWG start is delayed from experiment start
+        #   when not delayed, we can use the scope trigger, but when delayed we need to send a software trigger
+        #   during the streaming loop
         if self.delayQ:
             self.triggerSource = 4 # software trigger if AWG trigger is separate from rest of scope
         else:
@@ -783,6 +830,25 @@ class Picoscope():
             0 # not used
         )
         assert_pico_ok(sigGenTriggerStatus)
+
+        # need to set AWG parameters depending on the wave type
+        # first do the built-in sine function
+        if self.awgWaveType == 0x00000011:
+            # need to set the frequency and range
+            self.setAWGFreq()
+            self.setAWGRange()
+            self.setAWGWaveform()
+        elif self.awgWaveType == 0x00000012:
+            # square wave. need to add duty cycle
+            self.setAWGFreq()
+            self.setAWGRange()
+            self.setAWGDuty()
+            self.setAWGWaveform()
+        else:
+            # arbitrary waveform, need to set frequency and buffer
+            self.setAWGBuffer()
+            self.setAWGFreq()
+            self.setAWGWaveform()
 
         # set up sig gen using SigGenApply
         # first initialize parameters to gather actual used values
@@ -803,6 +869,10 @@ class Picoscope():
             ctypes.byref(actualDwellTime)
         )
         assert_pico_ok(sigGenApplyStatus)
+
+        # need to pause immediately or the AWG will apply a constant voltage equal to the first value until it starts
+        pauseStatus = ps.psospaSigGenPause(self.cHandle)
+        assert_pico_ok(pauseStatus)
 
         # todo: delete once tested
         # else:
@@ -934,11 +1004,7 @@ class Picoscope():
 
         self.awgBuffer = np.ctypeslib.as_ctypes(floorArray)
 
-        sigGenWaveformStatus = ps.psospaSigGenWaveform(self.cHandle,
-                                                       0x10000000, # PICO_ARBITRARY
-                                                       ctypes.byref(self.awgBuffer),
-                                                       ctypes.c_uint64(self.awgSamples))
-        assert_pico_ok(sigGenWaveformStatus)
+
 
     # def generateAWGBuffer(self):
     #     '''
@@ -1031,6 +1097,54 @@ class Picoscope():
         #
         # return 0
 
+    def setAWGWaveform(self):
+        '''
+        Formats call to psospaSigGenWaveform depending on the user input awg function
+        If a built-in sine or square wave, uses those
+        For arbitrary profiles, it also uses the buffers specified in setAWGBuffer()
+        :return:
+        '''
+        if type(self.awgFunc) == str:
+            # using a built-in function, so no argument used for buffer or buffer length
+            sigGenWaveformStatus = ps.psospaSigGenWaveform(self.cHandle,
+                                                           self.awgWaveType,  # PICO_ARBITRARY
+                                                           None,
+                                                           ctypes.c_uint64(0))
+        else:
+            # using an arbitrary waveform, need to use buffer spedified in setAWGBuffer()
+            sigGenWaveformStatus = ps.psospaSigGenWaveform(self.cHandle,
+                                                           self.awgWaveType, # PICO_ARBITRARY
+                                                           ctypes.byref(self.awgBuffer),
+                                                           ctypes.c_uint64(self.awgSamples))
+        assert_pico_ok(sigGenWaveformStatus)
+
+    def setAWGRange(self):
+        '''
+        Sets peak-to-peak and offset for built-in AWG functions. Does some basic error checking and then calls
+        psospaSigGenRange() based on inputs in 'awgFuncKwargs' experimental parameter
+        '''
+        amp = self.awgFuncKwargs['amp']
+        offset = self.awgFuncKwargs['offset']
+
+        if amp + offset > self.maxAWGVolts.value or offset - amp < self.minAWGVolts.value:
+            raise ValueError("setAWGRange: specified combination of amplitude and range are outside the AWG limits (" +
+                             str(self.minAWGVolts.value) + " - " + str(self.maxAWGVolts.value) + " V).")
+
+        rangeStatus = ps.psospaSigGenRange(self.cHandle,
+                                           ctypes.c_double(amp), # peak - to - peak
+                                           ctypes.c_double(offset)) # voltage offset
+        assert_pico_ok(rangeStatus)
+
+    def setAWGDuty(self):
+        '''
+        Sets the duty cycle for the built-in square wave. Converts input duty kwarg (0 -1 ) to a percent first
+        '''
+
+        dutyPercent = self.awgFuncKwargs['duty'] * 100
+        dutyStatus = ps.psospaSigGenWaveformDutyCycle(self.cHandle,
+                                                      ctypes.c_double(dutyPercent))
+        assert_pico_ok(dutyStatus)
+
     def setAWGFreq(self):
         '''
         Resolves the AWG frequency based on user inputs and hardware limits, then sets the value
@@ -1050,7 +1164,7 @@ class Picoscope():
         minDwell = ctypes.c_double()
         maxDwell = ctypes.c_double()
         freqLimitsStatus = ps.psospaSigGenFrequencyLimits(self.cHandle,
-                                                          0x10000000,  # wave type = arbitrary
+                                                          self.awgWaveType,
                                                           ctypes.byref(ctypes.c_uint64(self.awgSamples)),
                                                           ctypes.byref(minFreq),
                                                           ctypes.byref(maxFreq),
@@ -1114,13 +1228,13 @@ class Picoscope():
                                                0, 4, enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"])
         bufferBStatus = ps.psospaSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
         bufferCStatus = ps.psospaSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
         bufferDStatus = ps.psospaSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
                                                ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"] | enums.PICO_ACTION["PICO_ADD"])
+                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
 
         assert_pico_ok(bufferAStatus)
         assert_pico_ok(bufferBStatus)

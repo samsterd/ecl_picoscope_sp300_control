@@ -31,13 +31,20 @@ experimentParameters = {
     # Oscilloscope params
     'awgFunc' : exp.squareWave, # Callable, function that can input an array of time values and output voltages at those times
                       # If set to None, the AWG will not be used
+                      # Can also use built-in AWG functions (sine and square wave) using arguments
+                      # "picoSine" and "picoSquare". These require kwargs specified later
     'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
-    'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'delayQ' : True}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
+    'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
+                        # For built-in functions, the following kwargs are required:
+                        #   "picoSine" : 'freq', 'amp', 'offset',
+                        #   "picoSquare" : 'freq', 'amp', 'offset', 'duty'
     'awgSamples' : -1, # Number of sample points to generate for the AWG function within each period
                         # setting to -1 will use the maximum number possible
                         # Note that the minimum period for the AWG DAC is 5 ns, so the AWG period / awg samples should be >= 5 ns
+                        # If using 'picoSine' or 'picoSquare' this option is ignored
     'awgPeriod' : None, # Duration in seconds to generate points for the voltage function. Should match period of awgFunc.
                         # If set to None, it will be calculated automatically based on the the frequency of the awgFunc
+                        # If using 'picoSine' or 'picoSquare' make sure this is set to None
                         #   NOTE: this only works if awgFuncKwargs contains the 'freq' key. If it does not, an error is raised
                         # Max AWG frequency is 20 MHz, so minimum tStop is 5e-8 seconds
                         # NOTE: the AWG will stay on its final value, so if awgPeriod does not match the periodicity of the awgFunc
