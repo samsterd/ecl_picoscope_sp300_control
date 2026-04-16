@@ -33,6 +33,7 @@ experimentParameters = {
                       # If set to None, the AWG will not be used
                       # Can also use built-in AWG functions (sine and square wave) using arguments
                       # "picoSine" and "picoSquare". These require kwargs specified later
+                      # todo: implement dc constant function (0x00000400)
     'awgFuncArgs' : (), # awgFuncArgs Tuple, additional positional arguments that will be passed to awgFunc when it is evaluated
     'awgFuncKwargs' : {'freq' : 1, 'amp' : 0.1, 'offset' : 0}, # Dict, additional keyword arguments that will be passed to awgFunc when it is evaluated
                         # For built-in functions, the following kwargs are required:
@@ -58,9 +59,14 @@ experimentParameters = {
                       #     will output a constant nonzero value at the start
     'experimentTime' : 2, # Duration that the awgFunc will be applied and photodetector / potentiostat measurements are done
     'requestedSampleInterval' : 1, # Time interval between measurements, in ns, BEFORE downsampling. Will be rounded down to
-                                 # to match an available time base for the Picoscope. Setting to -1 will go to a default value (currently 1)
+                                 # to match an available time base for the Picoscope. Setting to -1 will go to a default value (currently 8)
+                                 # Picoscope3415E specs claim down to 4 ns for sampling in streaming mode with downsampling.
+                                 #  experimentally we have had memory overflow issues down to 8
     'requestedDownsampleInterval': 1000, # Time interval between downsampled measurements. Will be rounded up to be an
-                                           # integer multiple of the actual time interval. Setting to -1 will go to a default value (currently 20000)
+                                           # integer multiple of the actual time interval. Setting to -1 will go to a default value (currently 10000)
+                                         # NOTE: Values below 4000 will cause the AWG start to be delayed in a way that awgDelayIndex
+                                         #  does not catch. Do not use awg delays if downsampling that fast
+                                         # todo: figure out why that happens and fix it
     'detectorVoltageRange0' : 2, # maximum voltage expected on photodetector 0 (Channel A)
     'detectorVoltageRange1' : 2, # maximum voltage expected on photodetector 1 (Channel B)
     # todo: add a minimum voltage so that an offset can be added?

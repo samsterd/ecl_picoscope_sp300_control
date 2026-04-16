@@ -127,8 +127,8 @@ class Picoscope():
         # todo: figure out what actual value is
         self.minAwgTimeStep = 5e-9      # minimum time step is 5 ns based on the value of ddsPeriod for Picoscope 3415E
         self.channelDRange = 20         # voltage range for channel D (the trigger channel)
-        self.autoSampleInterval = 1 # sampling interval to aim for when scopeSamples = -1
-        self.autoDownsampleInterval = 20000 # final sample interval to achieve with downsampling if downsampleRatio = -1
+        self.autoSampleInterval = 8 # sampling interval to aim for when scopeSamples = -1
+        self.autoDownsampleInterval = 10000 # final sample interval to achieve with downsampling if downsampleRatio = -1
         # todo: check this formatting is correct
         self.channelEnabledBitfield = 0b1111 # bitfield indicated Channel A-D are on
 
@@ -566,7 +566,7 @@ class Picoscope():
         triggerType = enums.PICO_SIGGEN_TRIG_TYPE["PICO_SIGGEN_RISING"]
         awgRunSamples = self.awgRunSamples
         awgStopQ = self.awgStopQ
-
+        awgStopped = False
 
         # gather data in a loop
         while collectedSamples < numberOfDownsamples:
@@ -587,9 +587,9 @@ class Picoscope():
 
             # update index, check for awg trigger
             collectedSamples = collectedSamples + streamData[0].noOfSamples
-            # print(collectedSamples)
 
             if delayQ and (not awgTriggered) and (collectedSamples >= awgTriggerSamples):
+
                 # unpause the AWG and fire the software trigger
                 awgRestartStatus = ps.psospaSigGenRestart(cHandle)
                 assert_pico_ok(awgRestartStatus)
@@ -602,11 +602,12 @@ class Picoscope():
                 awgStopIndex = awgDelayIndex + awgRunSamples
 
 
-            if awgStopQ and collectedSamples >= awgStopIndex:
+            if awgStopQ and not(awgStopped) and collectedSamples >= awgStopIndex:
                 # need to pause the AWG or it will apply a constant voltage equal to the last value applied
                 #   for the rest of the experiment
                 stopStatus = ps.psospaSigGenPause(cHandle)
                 assert_pico_ok(stopStatus)
+                awgStopped = True
 
         # stop streaming
         stopStatus = ps.psospaStop(cHandle)
@@ -616,6 +617,7 @@ class Picoscope():
         self.memoryOverflow = memoryOverflow
         if delayQ:
             self.awgDelayIndex = awgDelayIndex
+            self.awgStopIndex = awgStopIndex
 
         # get ADC limits
         maxADC = ctypes.c_int16()
