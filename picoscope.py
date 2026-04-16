@@ -85,6 +85,7 @@ from picosdk.constants import PICO_STATUS
 import time
 import timeit
 from copy import copy
+from scipy.signal import square
 
 
 class Picoscope():
@@ -268,8 +269,12 @@ class Picoscope():
         self.sampleIntervalSeconds = ctypes.c_double()
         self.sampleIntervalUnit = enums.PICO_TIME_UNITS["PICO_S"]
 
-        # this handles the default (-1) and when the input is below the streaming minimum of 4ns
-        if self.requestedSampleInterval < 4:
+        # resolve user input sample interval based on defaults and bounds
+        if self.requestedSampleInterval == -1:
+            requestedInverval = ctypes.c_double(self.autoSampleInterval / 1e9)
+        elif self.requestedSampleInterval < 4:
+            print("Picoscope warning: minimum sampling interval while streaming with downsampling on 4 channels is 4 ns." +
+                  "Sample interval changed to 4 ns for this experiment.")
             requestedInterval = ctypes.c_double(4.0e-9)
         # else find the nearest possible value, rounding down
         else:
@@ -701,7 +706,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (uint32 - ignored for data collection)
         #   autoTrigger_us (int32 - 10000s - trigger after 2 s)
-        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 5000, 0, 0, ctypes.c_uint32(2000))
+        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 500000, 0, 0, 0)#ctypes.c_uint32(200000))
 
         assert_pico_ok(triggerStatus)
 
@@ -834,9 +839,8 @@ class Picoscope():
         assert_pico_ok(sigGenTriggerStatus)
 
         # need to set AWG parameters depending on the wave type
-        # first do the built-in sine function
         if self.awgWaveType == 0x00000011:
-            # need to set the frequency and range
+            # first do the built-in sine function
             self.setAWGFreq()
             self.setAWGRange()
             self.setAWGWaveform()
@@ -1102,7 +1106,8 @@ class Picoscope():
     def setAWGWaveform(self):
         '''
         Formats call to psospaSigGenWaveform depending on the user input awg function
-        If a built-in sine or square wave, uses those
+        If a built-in sine or square wave, uses those. Also puts in filler values for self.awg and self.awgTime
+            for downstream processing
         For arbitrary profiles, it also uses the buffers specified in setAWGBuffer()
         :return:
         '''
@@ -1112,6 +1117,16 @@ class Picoscope():
                                                            self.awgWaveType,  # PICO_ARBITRARY
                                                            None,
                                                            ctypes.c_uint64(0))
+
+            # generate filler sine and square waves for later use
+            if self.awgWaveType == 0x00000011: #sine
+                self.awgTime = np.linspace(0, self.awgPeriod, 100)
+                self.awg = sinWave(self.awgTime, **self.awgFuncKwargs)
+            elif self.awgWaveType == 0x00000012: #square
+                self.awgTime = np.linspace(0, self.awgPeriod, 100)
+                sqKwargs = copy(self.awgFuncKwargs)
+                sqKwargs['delayQ'] = self.delayQ
+                self.awg = squareWave(self.awgTime, **sqKwargs)
         else:
             # using an arbitrary waveform, need to use buffer spedified in setAWGBuffer()
             sigGenWaveformStatus = ps.psospaSigGenWaveform(self.cHandle,
@@ -1335,3 +1350,55 @@ class Picoscope():
 # a test input function for the AWG
 def testVT(times, freq = 100, amp = 0.1):
     return amp * np.sin(2 * np.pi * times * freq)
+
+# copy this over from experiments to avoid circular import of module. there is probably a better way to handle this...
+def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5, delayQ = False):
+    '''
+    Returns a square wave voltage.
+
+    Args:
+        times (array): input time array
+        freq (float): frequency of square wave
+        amp (float): difference between minimum and maximum voltage / 2. Must be less than 2
+            Note: Positive amp results in starting at the maximum voltage, while a negative amp starts at negative voltage
+        offset (float) : constant added to wave to offset the average value from 0
+        duty (float) : fraction of wave period spent at the voltage maximum. Must be between 0 and 1
+        delayQ (bool) : will this function be used with a nonzero awgDelay parameter. If so, the first and last values will
+                        be set to 0 to avoid outputting a constant nonzero voltage before and after running
+    Returns:
+        array : voltages of square wave of length equal to times
+    '''
+
+    # scipy implementation has a default period of 2pi so time input is stretched by factor of freq to match input
+    # output value is -1 to +1, starting at +1
+    # need to handle positive and negative amp separately since the meaning of duty gets reversed with negative amp
+    if amp > 0:
+        sqBase = square(2 * np.pi * freq * times, duty)
+    elif amp < 0:
+        sqBase = -1 * square(2 * np.pi * freq * times, 1 - duty)
+    else:
+        # handle case where amp is 0 because the user is being silly
+        sqBase = np.zeros(len(times))
+
+    # next, scale by abs(amp) since the sign was handled previously
+    # then add the offset value, handle delay, and return
+    output = (abs(amp) * sqBase) + offset
+
+    if delayQ:
+        output[0] = 0
+        output[-1] = 0
+        return output
+    else:
+        return output
+
+def sinWave(times, freq=100, amp=0.1, offset=0):
+    '''
+    Returns a sine wave voltage profile
+
+    :param times:
+    :param freq:
+    :param amp:
+    :param offset:
+    :return:
+    '''
+    return amp * np.sin(2 * np.pi * times * freq) + offset
