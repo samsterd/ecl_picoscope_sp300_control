@@ -49,6 +49,16 @@
 #       xstreamingCallback: delete once everything is tested
 #       xclosePicoscope: change function name
 
+# fixing streaming memory constraints:
+#       initDataBuffers: create local array for holding the data, create multiple buffers for each channel to hold the
+#                           streaming data
+#                       size of hardware buffers: 20% of max memory?
+#                           issue isn't the assigned buffers but the memory allocated to samples (not downsamples)
+#                           is this alleviated by clear|add action?
+#       runStream: copy back the callback function -
+#           handle triggered prev, triggered on current, etc
+#           handle changing over buffers? or just let it be
+
 
 #       self.downsamplingQ if downsamplingRatio != 1
 #       check handling of resolveSampleInterval
@@ -132,7 +142,7 @@ class Picoscope():
         self.autoDownsampleInterval = 10000 # final sample interval to achieve with downsampling if downsampleRatio = -1
         # todo: check this formatting is correct
         self.channelEnabledBitfield = 0b1111 # bitfield indicated Channel A-D are on
-
+        self.numberOfChannels = 4
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
@@ -500,7 +510,7 @@ class Picoscope():
             ctypes.byref(self.sampleIntervalSeconds),
             self.sampleIntervalUnit,
             ctypes.c_uint64(0),
-            ctypes.c_uint64(self.numberOfSamples),
+            ctypes.c_uint64(self.numberOfDownsamples),
             ctypes.c_int16(0),
             ctypes.c_uint64(self.downsampleRatio),
             4
@@ -558,12 +568,21 @@ class Picoscope():
             else:
                 # awg is running without a delay so stopping is based only on the number of samples it is running for
                 awgStopIndex = self.awgRunSamples
+        else:
+            #   WE'RE NOT STOPPING WOOOOOOO
+            awgStopIndex = self.numberOfDownsamples
 
-        collectedSamples = 0
+        # initialize indices for tracking stream progress
+        saveStartIndex = [0,0,0,0] # for tracking where to save in the raw data buffers
+        bufferStartIndex = [0,0,0,0] # for tracking where to grab data from the data buffers
+        timeIndex = 0 # furthest save index in time, closest we have to a proxy for actual experiment time. Used for triggering AWG
+        minTimeIndex = 0 # slowest save index in time. Used for stopping the collection loop
+        bufferResetThreshold = math.floor(0.75 * self.numberOfDownsamples)
 
         # streaming loop needs to be very fast. We can get some performance gains by converting all class variables to
         #   local variables. The ones that are altered during collection will be re-saved after the loop
         numberOfDownsamples = self.numberOfDownsamples
+        numberOfChannels = self.numberOfChannels
         cHandle = self.cHandle
         memoryOverflow = self.memoryOverflow # UPDATE THIS ONE AFTER LOOP
         delayQ = self.delayQ
@@ -572,9 +591,12 @@ class Picoscope():
         awgRunSamples = self.awgRunSamples
         awgStopQ = self.awgStopQ
         awgStopped = False
+        # flags to account for whether the primary trigger fired one the current data collection cycle
+        triggered = False
+        clearBufferAction = enums.PICO_ACTION["PICO_CLEAR_THIS_DATA_BUFFER"]
 
         # gather data in a loop
-        while collectedSamples < numberOfDownsamples:
+        while timeIndex < numberOfDownsamples:
 
             # args:
             #   cHandle
@@ -585,15 +607,77 @@ class Picoscope():
             getValsStatus = ps.psospaGetStreamingLatestValues(cHandle, ctypes.byref(streamData), 4,
                                                               ctypes.byref(streamTrigger))
 
+
             # check for memory overflow using error codes on return
             # 268435464: "Pico Device Memory Overflow: The memory on board the device has overflowed."
             if getValsStatus == 268435464:
                 memoryOverflow = True
 
-            # update index, check for awg trigger
-            collectedSamples = collectedSamples + streamData[0].noOfSamples
+            elif getValsStatus != 0:
+                print("another error message occurred during streaming:")
+                print(getValsStatus)
 
-            if delayQ and (not awgTriggered) and (collectedSamples >= awgTriggerSamples):
+            # need to handle three cases on callback: no trigger, triggered this cycle, and triggered previously
+            if triggered:
+                # previously triggered, full returned data
+                # streamdata: noOfSamples, bufferIndex, startIndex, overflow
+                # iterate through channels and add data
+                for i in range(numberOfChannels):
+                    # set index endpoints
+                    numberOfSamples = streamData[i].noOfSamples
+                    saveEnd = saveStartIndex[i] + numberOfSamples
+                    if saveEnd < numberOfDownsamples:
+                        saveEndIndex = saveStartIndex[i] + numberOfSamples
+                        bufferEndIndex = bufferStartIndex[i] + numberOfSamples
+                    else:
+                        # need to account for buffer being larger than save arrays
+                        saveEndIndex = numberOfDownsamples - 1
+                        adjustedNumberOfSamples = numberOfSamples - (saveEnd - saveEndIndex)
+                        bufferEndIndex = bufferStartIndex[i] + adjustedNumberOfSamples
+
+                    # gather data
+                    self.rawData[i][saveStartIndex[i]: saveEndIndex] = self.dataBuffers[i][bufferStartIndex[i] : bufferEndIndex]
+
+                    # update index trackers
+                    saveStartIndex[i] = saveEndIndex
+                    bufferStartIndex[i] = bufferEndIndex
+
+                timeIndex = max(saveStartIndex)
+                minTimeIndex = min(saveStartIndex)
+
+            elif streamTrigger.triggered:
+                # this should only occur once per experiment
+                # only gathers data after the trigger at index
+                triggered = True
+                for i in range(numberOfChannels):
+                    # set index bounds
+                    # number of samples to collect is bufferStart + numberOfSamples - triggerAt
+                    # buffer - start at triggerAt, go to bufferStart + numberOfSamples (I think)
+                    # raw data - start at 0, go to numberOfSamples
+                    numberOfSamples = streamData[i].noOfSamples - streamTrigger.triggerAt
+                    bufferEndIndex = bufferStartIndex[i] + streamData[i].noOfSamples
+                    bufferStart = bufferStartIndex[i] + streamTrigger.triggerAt
+                    # print(numberOfSamples)
+                    # print(streamData[i].noOfSamples)
+                    # print(streamTrigger.triggerAt)
+                    print(bufferStartIndex[i])
+
+                    self.rawData[i][0: numberOfSamples] = self.dataBuffers[i][bufferStart: bufferEndIndex]
+
+                    # update trackers
+                    saveStartIndex[i] = numberOfSamples
+                    bufferStartIndex[i] = bufferEndIndex
+
+                timeIndex = max(saveStartIndex)
+                minTimeIndex = min(saveStartIndex)
+
+            else:
+                # before triggers, just need to update the buffer indices
+                for i in range(numberOfChannels):
+                    bufferStartIndex[i] += streamData[i].noOfSamples
+
+            # next handle AWG triggering separately
+            if delayQ and (not awgTriggered) and (timeIndex >= awgTriggerSamples):
 
                 # unpause the AWG and fire the software trigger
                 awgRestartStatus = ps.psospaSigGenRestart(cHandle)
@@ -602,17 +686,28 @@ class Picoscope():
                 assert_pico_ok(awgTriggerStatus)
 
                 # save parameters and set some flags
-                awgDelayIndex = copy(collectedSamples)
+                awgDelayIndex = copy(timeIndex)
                 awgTriggered = True
                 awgStopIndex = awgDelayIndex + awgRunSamples
 
 
-            if awgStopQ and not(awgStopped) and collectedSamples >= awgStopIndex:
+            if awgStopQ and not(awgStopped) and timeIndex >= awgStopIndex:
                 # need to pause the AWG or it will apply a constant voltage equal to the last value applied
                 #   for the rest of the experiment
                 stopStatus = ps.psospaSigGenPause(cHandle)
                 assert_pico_ok(stopStatus)
                 awgStopped = True
+
+            # finally, do some memory management. If the bufferStart indices are approaching a threshold of fullness, clear them
+            # for i in range(numberOfChannels):
+            #     if bufferStartIndex[i] > bufferResetThreshold:
+            #         bufferStatus = ps.psospaSetDataBuffer(cHandle, i, ctypes.byref(self.dataBuffers[i]),
+            #                                               ctypes.c_uint64(numberOfDownsamples),
+            #                                               enums.PICO_DATA_TYPE["PICO_INT16_T"],
+            #                                               0, 4, clearBufferAction)
+            #         assert_pico_ok(bufferStatus)
+
+            # print(str(timeIndex) + " current | needed: " + str(numberOfDownsamples))
 
         # stop streaming
         stopStatus = ps.psospaStop(cHandle)
@@ -634,10 +729,10 @@ class Picoscope():
         self.time = np.linspace(0, self.correctedExperimentTime, self.numberOfDownsamples)
 
         # note that the raw data are 16-bit ints. They need to be converted to 32- or 64- bit to avoid overflows
-        self.channelAData = np.array(adc2mVV2(self.channelABuffer, self.aRangeMax.value, maxADC))
-        self.channelBData = np.array(adc2mVV2(self.channelBBuffer, self.bRangeMax.value, maxADC))
-        self.channelCData = np.array(adc2mVV2(self.channelCBuffer, self.cRangeMax.value, maxADC))
-        self.channelDData = np.array(self.channelDBuffer) # we want the channel D data in raw ADC to judge the triggering set point
+        self.channelAData = np.array(adc2mVV2(self.rawData[0], self.aRangeMax.value, maxADC))
+        self.channelBData = np.array(adc2mVV2(self.rawData[1], self.bRangeMax.value, maxADC))
+        self.channelCData = np.array(adc2mVV2(self.rawData[2], self.cRangeMax.value, maxADC))
+        self.channelDData = np.array(self.rawData[3]) # we want the channel D data in raw ADC to judge the triggering set point
 
         # catch if delay was missed and put in a filler delay index to avoid later crashes
         if not hasattr(self, 'awgDelayIndex'):
@@ -706,7 +801,7 @@ class Picoscope():
         #   direction 0 (ABOVE)
         #   delay (uint32 - ignored for data collection)
         #   autoTrigger_us (int32 - 10000s - trigger after 2 s)
-        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 500000, 0, 0, 0)#ctypes.c_uint32(200000))
+        triggerStatus = ps.psospaSetSimpleTrigger(self.cHandle, 1, 3, 500000, 0, 0, ctypes.c_uint32(20000))
 
         assert_pico_ok(triggerStatus)
 
@@ -1223,10 +1318,10 @@ class Picoscope():
         '''
 
         # allocate streaming buffers
-        self.channelABuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
-        self.channelBBuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
-        self.channelCBuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
-        self.channelDBuffer = np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples, dtype=ctypes.c_int16))
+        self.dataBuffers = [np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples * 2, dtype=ctypes.c_int16)) for i in range(self.numberOfChannels)]
+
+        # arrays for copying down raw data during streaming
+        self.rawData = [np.zeros(self.numberOfDownsamples, dtype = ctypes.c_int16) for i in range(self.numberOfChannels)]
 
         # call setDataBuffer
         # args:
@@ -1240,52 +1335,36 @@ class Picoscope():
         #   action (enum) : method to create buffer
         #           clear then add for first buffer, then add for the rest
         #           enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"]
-        bufferAStatus = ps.psospaSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
-                                               ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+        for i in range(self.numberOfChannels):
+            if i == 0:
+                # for first buffer, need to clear memory. after that we can just add
+                bufferStatus = ps.psospaSetDataBuffer(self.cHandle, i, ctypes.byref(self.dataBuffers[i]),
+                                               ctypes.c_uint64(self.numberOfDownsamples * 2), enums.PICO_DATA_TYPE["PICO_INT16_T"],
                                                0, 4, enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"])
-        bufferBStatus = ps.psospaSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
-                                               ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
-        bufferCStatus = ps.psospaSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
-                                               ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
-        bufferDStatus = ps.psospaSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
-                                               ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
-                                               0, 4, enums.PICO_ACTION["PICO_ADD"])
+            else:
+                bufferStatus = ps.psospaSetDataBuffer(self.cHandle, i, ctypes.byref(self.dataBuffers[i]),
+                                       ctypes.c_uint64(self.numberOfDownsamples * 2), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+                                       0, 4, enums.PICO_ACTION["PICO_ADD"])
+            assert_pico_ok(bufferStatus)
 
-        assert_pico_ok(bufferAStatus)
-        assert_pico_ok(bufferBStatus)
-        assert_pico_ok(bufferCStatus)
-        assert_pico_ok(bufferDStatus)
-
-        # initialize trackers that will be used by the callback function to copy data from buffers to proper location in data arrays
-        # these are based on the streaming example in the picosdk github
-        # self.nextSample = 0
-        # self.autoStopOuter = False
-        # self.wasCalledBack = False
-
-        # else:
-        # args:
-        #   chandle (int16)
-        #   channel (0-3 - each channel needs its own data buffer)
-        #   buffer (pointer to array of int16) - location of data
-        #   bufferLth (int32) - length of buffer arrays (i.e. self.experimentSamples)
-        #   segmentIndex (uint32) - not used in streaming mode
-        #   mode (constant) - used for downsampling. 0 for none, 4 for average
-        # bufferAStatus = ps.ps2000aSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
-        #                                         self.dataBufferSize, 0, self.downsamplingMode)
-        # bufferBStatus = ps.ps2000aSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
-        #                                         self.dataBufferSize, 0, self.downsamplingMode)
-        # bufferCStatus = ps.ps2000aSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
-        #                                         self.dataBufferSize, 0, self.downsamplingMode)
-        # bufferDStatus = ps.ps2000aSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
-        #                                         self.dataBufferSize, 0, self.downsamplingMode)
+        # bufferAStatus = ps.psospaSetDataBuffer(self.cHandle, 0, ctypes.byref(self.channelABuffer),
+        #                                        ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+        #                                        0, 4, enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"])
+        # bufferBStatus = ps.psospaSetDataBuffer(self.cHandle, 1, ctypes.byref(self.channelBBuffer),
+        #                                        ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+        #                                        0, 4, enums.PICO_ACTION["PICO_ADD"])
+        # bufferCStatus = ps.psospaSetDataBuffer(self.cHandle, 2, ctypes.byref(self.channelCBuffer),
+        #                                        ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+        #                                        0, 4, enums.PICO_ACTION["PICO_ADD"])
+        # bufferDStatus = ps.psospaSetDataBuffer(self.cHandle, 3, ctypes.byref(self.channelDBuffer),
+        #                                        ctypes.c_uint64(self.numberOfDownsamples), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+        #                                        0, 4, enums.PICO_ACTION["PICO_ADD"])
         #
-        # # error checking
         # assert_pico_ok(bufferAStatus)
         # assert_pico_ok(bufferBStatus)
         # assert_pico_ok(bufferCStatus)
         # assert_pico_ok(bufferDStatus)
+
 
     # def streamingCallback(self, handle, numberOfSamples, startIndex, overflow, triggerAT, triggered, autoStop,
     #                       pParameter):
