@@ -588,6 +588,8 @@ class Picoscope():
         delayQ = self.delayQ
         awgTriggerSamples = self.awgTriggerSamples
         triggerType = enums.PICO_SIGGEN_TRIG_TYPE["PICO_SIGGEN_RISING"]
+        triggerIndex = -1
+        timeIndex = 0
         awgRunSamples = self.awgRunSamples
         awgStopQ = self.awgStopQ
         awgStopped = False
@@ -596,8 +598,9 @@ class Picoscope():
         clearBufferAction = enums.PICO_ACTION["PICO_CLEAR_THIS_DATA_BUFFER"]
 
         # gather data in a loop
-        while timeIndex < numberOfDownsamples:
+        while timeIndex < numberOfDownsamples - 1:
 
+            # move data from hardware to buffer
             # args:
             #   cHandle
             #   pointer to streaming data info structs : streamData
@@ -613,68 +616,29 @@ class Picoscope():
             if getValsStatus == 268435464:
                 memoryOverflow = True
 
+            elif getValsStatus == 407:
+                print("data buffer ran out of memory. since data buffers have 4x expected memory usage, something probably"
+                      "went wrong. maybe the trigger was missed? anyway, ending collection early.")
+                break
+
             elif getValsStatus != 0:
                 print("another error message occurred during streaming:")
                 print(getValsStatus)
 
-            # need to handle three cases on callback: no trigger, triggered this cycle, and triggered previously
-            if triggered:
-                # previously triggered, full returned data
-                # streamdata: noOfSamples, bufferIndex, startIndex, overflow
-                # iterate through channels and add data
-                for i in range(numberOfChannels):
-                    # set index endpoints
-                    numberOfSamples = streamData[i].noOfSamples
-                    saveEnd = saveStartIndex[i] + numberOfSamples
-                    if saveEnd < numberOfDownsamples:
-                        saveEndIndex = saveStartIndex[i] + numberOfSamples
-                        bufferEndIndex = bufferStartIndex[i] + numberOfSamples
-                    else:
-                        # need to account for buffer being larger than save arrays
-                        saveEndIndex = numberOfDownsamples - 1
-                        adjustedNumberOfSamples = numberOfSamples - (saveEnd - saveEndIndex)
-                        bufferEndIndex = bufferStartIndex[i] + adjustedNumberOfSamples
-
-                    # gather data
-                    self.rawData[i][saveStartIndex[i]: saveEndIndex] = self.dataBuffers[i][bufferStartIndex[i] : bufferEndIndex]
-
-                    # update index trackers
-                    saveStartIndex[i] = saveEndIndex
-                    bufferStartIndex[i] = bufferEndIndex
-
-                timeIndex = max(saveStartIndex)
-                minTimeIndex = min(saveStartIndex)
-
-            elif streamTrigger.triggered:
+            # check if a trigger occurred. If it did, save what index it occurred on
+            if streamTrigger.triggered:
                 # this should only occur once per experiment
                 # only gathers data after the trigger at index
                 triggered = True
-                for i in range(numberOfChannels):
-                    # set index bounds
-                    # number of samples to collect is bufferStart + numberOfSamples - triggerAt
-                    # buffer - start at triggerAt, go to bufferStart + numberOfSamples (I think)
-                    # raw data - start at 0, go to numberOfSamples
-                    numberOfSamples = streamData[i].noOfSamples - streamTrigger.triggerAt
-                    bufferEndIndex = bufferStartIndex[i] + streamData[i].noOfSamples
-                    bufferStart = bufferStartIndex[i] + streamTrigger.triggerAt
-                    # print(numberOfSamples)
-                    # print(streamData[i].noOfSamples)
-                    # print(streamTrigger.triggerAt)
-                    print(bufferStartIndex[i])
+                triggerIndex = bufferStartIndex[0] + streamTrigger.triggerAt
 
-                    self.rawData[i][0: numberOfSamples] = self.dataBuffers[i][bufferStart: bufferEndIndex]
+            # update the buffer indices
+            for i in range(numberOfChannels):
+                bufferStartIndex[i] += streamData[i].noOfSamples
 
-                    # update trackers
-                    saveStartIndex[i] = numberOfSamples
-                    bufferStartIndex[i] = bufferEndIndex
-
-                timeIndex = max(saveStartIndex)
-                minTimeIndex = min(saveStartIndex)
-
-            else:
-                # before triggers, just need to update the buffer indices
-                for i in range(numberOfChannels):
-                    bufferStartIndex[i] += streamData[i].noOfSamples
+            # update the timing index only if trigger occurred
+            if triggered:
+                timeIndex = max(bufferStartIndex) - triggerIndex
 
             # next handle AWG triggering separately
             if delayQ and (not awgTriggered) and (timeIndex >= awgTriggerSamples):
@@ -698,6 +662,87 @@ class Picoscope():
                 assert_pico_ok(stopStatus)
                 awgStopped = True
 
+            #     for i in range(numberOfChannels):
+            #         # set index bounds
+            #         # number of samples to collect is bufferStart + numberOfSamples - triggerAt
+            #         # buffer - start at triggerAt, go to bufferStart + numberOfSamples (I think)
+            #         # raw data - start at 0, go to numberOfSamples
+            #         numberOfSamples = streamData[i].noOfSamples - streamTrigger.triggerAt
+            #         bufferEndIndex = bufferStartIndex[i] + streamData[i].noOfSamples
+            #         bufferStart = bufferStartIndex[i] + streamTrigger.triggerAt
+            #         # print(numberOfSamples)
+            #         # print(streamData[i].noOfSamples)
+            #         # print(streamTrigger.triggerAt)
+            #         print(bufferStartIndex[i])
+            #
+            #         self.rawData[i][0: numberOfSamples] = self.dataBuffers[i][bufferStart: bufferEndIndex]
+            #
+            #         # update trackers
+            #         saveStartIndex[i] = numberOfSamples
+            #         bufferStartIndex[i] = bufferEndIndex
+            #
+            #     timeIndex = max(saveStartIndex)
+            #     minTimeIndex = min(saveStartIndex)
+            #
+            #     # previously triggered, full returned data
+            #     # streamdata: noOfSamples, bufferIndex, startIndex, overflow
+            #     # iterate through channels and add data
+            #     for i in range(numberOfChannels):
+            #         # set index endpoints
+            #         numberOfSamples = streamData[i].noOfSamples
+            #         saveEnd = saveStartIndex[i] + numberOfSamples
+            #         if saveEnd < numberOfDownsamples:
+            #             saveEndIndex = saveStartIndex[i] + numberOfSamples
+            #             bufferEndIndex = bufferStartIndex[i] + numberOfSamples
+            #         else:
+            #             # need to account for buffer being larger than save arrays
+            #             saveEndIndex = numberOfDownsamples - 1
+            #             adjustedNumberOfSamples = numberOfSamples - (saveEnd - saveEndIndex)
+            #             bufferEndIndex = bufferStartIndex[i] + adjustedNumberOfSamples
+            #
+            #         # gather data
+            #         self.rawData[i][saveStartIndex[i]: saveEndIndex] = self.dataBuffers[i][bufferStartIndex[i] : bufferEndIndex]
+            #
+            #         # update index trackers
+            #         saveStartIndex[i] = saveEndIndex
+            #         bufferStartIndex[i] = bufferEndIndex
+            #
+            #     timeIndex = max(saveStartIndex)
+            #     minTimeIndex = min(saveStartIndex)
+            #
+            # elif streamTrigger.triggered:
+            #     # this should only occur once per experiment
+            #     # only gathers data after the trigger at index
+            #     triggered = True
+            #     for i in range(numberOfChannels):
+            #         # set index bounds
+            #         # number of samples to collect is bufferStart + numberOfSamples - triggerAt
+            #         # buffer - start at triggerAt, go to bufferStart + numberOfSamples (I think)
+            #         # raw data - start at 0, go to numberOfSamples
+            #         numberOfSamples = streamData[i].noOfSamples - streamTrigger.triggerAt
+            #         bufferEndIndex = bufferStartIndex[i] + streamData[i].noOfSamples
+            #         bufferStart = bufferStartIndex[i] + streamTrigger.triggerAt
+            #         # print(numberOfSamples)
+            #         # print(streamData[i].noOfSamples)
+            #         # print(streamTrigger.triggerAt)
+            #         print(bufferStartIndex[i])
+            #
+            #         self.rawData[i][0: numberOfSamples] = self.dataBuffers[i][bufferStart: bufferEndIndex]
+            #
+            #         # update trackers
+            #         saveStartIndex[i] = numberOfSamples
+            #         bufferStartIndex[i] = bufferEndIndex
+            #
+            #     timeIndex = max(saveStartIndex)
+            #     minTimeIndex = min(saveStartIndex)
+            #
+            # else:
+            #     # before triggers, just need to update the buffer indices
+            #     for i in range(numberOfChannels):
+            #         bufferStartIndex[i] += streamData[i].noOfSamples
+
+
+
             # finally, do some memory management. If the bufferStart indices are approaching a threshold of fullness, clear them
             # for i in range(numberOfChannels):
             #     if bufferStartIndex[i] > bufferResetThreshold:
@@ -713,8 +758,15 @@ class Picoscope():
         stopStatus = ps.psospaStop(cHandle)
         assert_pico_ok(stopStatus)
 
+        # move data from buffers to the data arrays
+        dataStart = triggerIndex
+        dataStop = triggerIndex + numberOfDownsamples
+        for i in range(numberOfChannels):
+            self.rawData[i] = self.dataBuffers[i][dataStart:dataStop]
+
         # update some class variables that were made local for the streaming loop
         self.memoryOverflow = memoryOverflow
+        self.triggerIndex = triggerIndex
         if delayQ:
             self.awgDelayIndex = awgDelayIndex
             self.awgStopIndex = awgStopIndex
@@ -908,10 +960,10 @@ class Picoscope():
         rawShots = max(math.floor(self.awgDuration / self.awgPeriod), 1)
 
         if rawShots > 2e64-1:
-            self.awgShots = 2e64-1 # max value of 64 bit int sets AWG to run continuously
+            self.awgShots = 0 # setting to 0 runs continuously
             self.awgDurationAdjusted = self.awgShots * self.awgPeriod
             print("AWG Warning: number of voltage function periods implied by awgPeriod and experimentTime settings exceeds " +
-                  "the amount possible using the AWG (2e64-1). Maybe chill out on the data collection?")
+                  "the amount possible using the AWG (2e64-1). Setting to run continuously. Maybe chill out on the data collection?")
         else:
             self.awgShots = rawShots
             self.awgDurationAdjusted = self.awgShots * self.awgPeriod
@@ -1318,7 +1370,7 @@ class Picoscope():
         '''
 
         # allocate streaming buffers
-        self.dataBuffers = [np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples * 2, dtype=ctypes.c_int16)) for i in range(self.numberOfChannels)]
+        self.dataBuffers = [np.ctypeslib.as_ctypes(np.zeros(self.numberOfDownsamples * 4, dtype=ctypes.c_int16)) for i in range(self.numberOfChannels)]
 
         # arrays for copying down raw data during streaming
         self.rawData = [np.zeros(self.numberOfDownsamples, dtype = ctypes.c_int16) for i in range(self.numberOfChannels)]
@@ -1339,11 +1391,11 @@ class Picoscope():
             if i == 0:
                 # for first buffer, need to clear memory. after that we can just add
                 bufferStatus = ps.psospaSetDataBuffer(self.cHandle, i, ctypes.byref(self.dataBuffers[i]),
-                                               ctypes.c_uint64(self.numberOfDownsamples * 2), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+                                               ctypes.c_uint64(self.numberOfDownsamples * 4), enums.PICO_DATA_TYPE["PICO_INT16_T"],
                                                0, 4, enums.PICO_ACTION["PICO_CLEAR_ALL"] | enums.PICO_ACTION["PICO_ADD"])
             else:
                 bufferStatus = ps.psospaSetDataBuffer(self.cHandle, i, ctypes.byref(self.dataBuffers[i]),
-                                       ctypes.c_uint64(self.numberOfDownsamples * 2), enums.PICO_DATA_TYPE["PICO_INT16_T"],
+                                       ctypes.c_uint64(self.numberOfDownsamples * 4), enums.PICO_DATA_TYPE["PICO_INT16_T"],
                                        0, 4, enums.PICO_ACTION["PICO_ADD"])
             assert_pico_ok(bufferStatus)
 
