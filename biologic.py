@@ -5,6 +5,7 @@ import sys
 import time
 import numpy as np
 from dataclasses import dataclass
+import safe_exit as se
 
 import kbio.kbio_types as KBIO
 from kbio.c_utils import c_is_64b
@@ -484,6 +485,7 @@ class Biologic:
 
         return output
 
+    @se.register
     def close(self):
 
         self.api.Disconnect(self.id)

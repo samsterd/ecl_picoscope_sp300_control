@@ -92,8 +92,7 @@ from picosdk.PicoDeviceEnums import picoEnum as enums
 from picosdk.PicoDeviceStructs import picoStruct as structs
 from picosdk.functions import adc2mVV2, assert_pico_ok, mV2adcV2
 from picosdk.constants import PICO_STATUS
-import time
-import timeit
+import safe_exit as se
 from copy import copy
 from scipy.signal import square
 
@@ -1466,6 +1465,7 @@ class Picoscope():
     #         self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[sourceStart: sourceEnd]
     #         self.nextSample += triggeredSamples
 
+    @se.register
     def closePicoscope(self):
         '''
         Closes connection to Picoscope.
