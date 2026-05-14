@@ -1288,6 +1288,8 @@ def squareWave(times : np.ndarray, freq = 100, amp = 0.1, offset = 0, duty = 0.5
     # then add the offset value, handle delay, and return
     output = (abs(amp) * sqBase) + offset
 
+    # todo: this needs to be handled better: for a wave that doesn't contain 0, this will add very tiny current spikes
+    #   every awgPeriod. Not sure if there's a better method
     if delayQ:
         output[0] = 0
         output[-1] = 0

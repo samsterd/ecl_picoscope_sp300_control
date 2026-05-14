@@ -653,7 +653,7 @@ def compareDatsAtKey(datList : list, titles : list, expIndex : int, xKey : str, 
         ax[0, i].set_title(titles[i])
     plt.show()
 
-def plotData(dat : dict, index : int, caV : float = 0.):
+def plotData(dat : dict, index : int, caV : float = 0., title = ""):
     '''
     Generates a simple four panelled plot of experimental data at the specified experiment index.
     Plots Detector A and B on top row, applied voltage and measured current on the bottom row
@@ -673,8 +673,9 @@ def plotData(dat : dict, index : int, caV : float = 0.):
     c = exp['potentiostatCurrent']
     awgt = exp['awgTime']
     awg = exp['awg']
+    awgDuration = exp['awgDuration']
     awgDelay = awgDelayTime(t, exp['awgDelayIndex'])
-    v = interpolateVoltageProfile(awg, awgt, t[-1], awgDelay, t, caV)
+    v = interpolateVoltageProfile(awg, awgt, awgDuration, awgDelay, t, caV)
 
     fig, ax = plt.subplots(2, 2)
     ax[0,0].plot(t, da)
@@ -685,6 +686,8 @@ def plotData(dat : dict, index : int, caV : float = 0.):
     ax[1,0].set_title('Applied Voltage (V vs Ag/Ag+)')
     ax[1,1].plot(t, c)
     ax[1,1].set_title('Current (A)')
+    if title != "":
+        fig.suptitle(title)
     plt.show()
 
 def plot2by2(dat : dict, index : int, xKeys : tuple, yKeys : tuple, titles : tuple, supTitle : str = ''):
