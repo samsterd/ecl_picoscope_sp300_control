@@ -145,7 +145,7 @@ class Picoscope():
 
         # open picoscope. this also initializes self.cHandle
         self.openPicoscope()
-
+        se.register(self.closePicoscope)
 
 
         # gather min/max waveform values
@@ -1465,7 +1465,6 @@ class Picoscope():
     #         self.channelDRawData[self.nextSample: destEnd] = self.channelDBuffer[sourceStart: sourceEnd]
     #         self.nextSample += triggeredSamples
 
-    @se.register
     def closePicoscope(self):
         '''
         Closes connection to Picoscope.

@@ -102,6 +102,7 @@ class Biologic:
             raise RuntimeError("Potentiostat USB address not found. Check that it is connected and try again.")
 
         self.id, self.deviceInfo = self.api.Connect(self.usb.address)
+        se.register(self.close)
 
         # todo: BE CONSISTENT WITH _ VERSUS camelCase
         self.board_type = self.api.GetChannelBoardType(self.id, self.channel)
@@ -485,7 +486,6 @@ class Biologic:
 
         return output
 
-    @se.register
     def close(self):
 
         self.api.Disconnect(self.id)
