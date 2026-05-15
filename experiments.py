@@ -1,6 +1,7 @@
 import data
 import picoscope as pico
 import biologic as bio
+import arduino_relay as stir
 import copy
 import numpy as np
 import time
@@ -15,7 +16,7 @@ from multiprocessing import Process, Queue, JoinableQueue, set_start_method, sha
 
 # experiment functions will live here. Eventually this will become more systematic
 
-def runMultiParamList(initParams: dict, paramLists: dict, downTime: float):
+def runMultiParamList(initParams: dict, paramLists: dict):
     '''
     Runs a series of experiments based off of an initial set of parameters and a list of parameters and the values to
     vary.
@@ -26,8 +27,6 @@ def runMultiParamList(initParams: dict, paramLists: dict, downTime: float):
         initParams (dict): an experimentalParameters dict. The values in keys contained in paramLists will be ignored
         paramLists (dict): a dict with keys that are in the initParams dict and values as a list of experimental parameters to
             iterate through. The length of each list must be the same
-        downTime (float): amount of time, in seconds, to wait between executing each experiment. During this time the
-            potentiostat is not collecting data and no current is flowing through the setup
 
     Returns:
         None. Data saved in the file specified
@@ -53,7 +52,7 @@ def runMultiParamList(initParams: dict, paramLists: dict, downTime: float):
         for key in paramLists.keys():
             paramDicts[i][key] = paramLists[key][i]
 
-    multiProcessExperimentsMain(paramDicts, downTime)
+    multiProcessExperimentsMain(paramDicts)
 
 
 def impedanceTest(params : dict, freqStart : float, freqStop : float, numberOfFreqs: int):
@@ -415,7 +414,41 @@ def multiProcessImpedanceExperiment(params, startFreq, endFreq, nFreqs):
     picoProcess.join(timeout = 10)
     picoProcess.close()
 
-def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
+def runDowntime(params : dict, relay):
+    '''
+    Executes downtime between experiments when running multiple experiments through multiProcessExperimentsMain etc
+
+    Args:
+        params (dict) : experimental parameters dict
+        relay : either an instance of the Relay class from arduino_relay.py, or None
+    '''
+    downtime = params['downtime']
+    stirQ = params['downtimeStirQ']
+    stirTime = params['stirTime']
+
+    # if no stirring, just sleep
+    if not(stirQ):
+        time.sleep(downtime)
+
+    # if stirring, check that stir time is valid. If longer than downtime, print a warning and stir the entire downtime
+    else:
+        if stirTime >= downtime:
+            print("Warning: stirring time >= downtime between experiments. Stir time will instead be set for the entire downtime.")
+            stirTime = downtime
+
+        # chekc that relay is not None
+        if not isinstance(relay, stir.Relay):
+            print("runDowntime Warning: stirring is specified but no valid Relay instance was specified. No stirring will occur.")
+            time.sleep(downtime)
+        else:
+            # run stir plate for stir time, then wait the rest of the downtime
+            nonStirTime = downtime - stirTime
+            relay.on()
+            time.sleep(stirTime)
+            relay.off()
+            time.sleep(nonStirTime)
+
+def multiProcessExperimentsMain(paramList : list):
     '''
     Function for performing experiments using multiprocessing. Runs in tandem with multiProcessExperimentsPico to run a
     series of ECL experiments using multiprocessing to ensure the Picoscope does not miss the trigger pulse at short
@@ -442,13 +475,10 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
         paramList: a list of experiment param dicts. They will be executed in order
                 NOTE: the save file will be defined by the first paramList. all experiments will be saved to the same file
                 if the first experiment has save = False, no data will be saved
-        downTime (float): amount of time, in seconds, to wait between executing each experiment. During this time the
-            potentiostat is not collecting data and no current is flowing through the setup
 
     Returns:
         None. Data is plotted and saved as defined in the params
     '''
-    #URGENT TODO: SAVING IS NOT WORKING PROPERLY. SAVES COLUMN NAMES BUT NO DATA! DOES NOT MAKE NEW ROWS FOR EACH EXPERIMENT!
     # check that input is a list of dicts
     # todo: write an experimentParamsQ function to check formatting
     for param in paramList:
@@ -457,6 +487,16 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
 
     firstExp = paramList[0]
     expNumber = 0
+
+    # connect to relay if any experiment is stirring
+    # this is done first because the arduino flashes on off a few times at startup.
+    # todo: this could be prevented by modifying the PySerial DTR settings according to google, look into this if its an issue
+    globalStirQ = any([params['downtimeStirQ'] for params in paramList])
+    if globalStirQ:
+        # we are assuming the baud rate will not be changed during the experient
+        relay = stir.Relay(paramList[0]['stirBaud'])
+    else:
+        relay = None
 
     # set up save file
     if firstExp['save']:
@@ -528,8 +568,8 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
         # signal that data is done processing
         multiQ.task_done()
 
-        if downTime > 0 and i < len(paramList) - 1:
-            time.sleep(downTime)
+        if exp['downtime'] > 0 and i < len(paramList) - 1:
+            runDowntime(exp, relay)
 
         expNumber += 1
 
@@ -539,6 +579,8 @@ def multiProcessExperimentsMain(paramList : list, downTime : float = 0):
     multiQ.put(endFlag)
 
     pot.close()
+    if globalStirQ:
+        relay.disconnect()
     multiQ.close()
     picoProcess.join(timeout = 10)
     picoProcess.close()

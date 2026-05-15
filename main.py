@@ -93,6 +93,14 @@ experimentParameters = {
     'startStep' : 0, # step index to start on. Must be less than len(vStep) - 1
     'numberOfCycles' : 0, # number of times CA is repeated
 
+    # downtime and stirring params
+    'downtime' : 10, # time, in s, to wait between experiments
+    'downtimeStirQ' : False, # boolean, should the stir plate be turned on during downtime
+    'stirTime' : 5, # time, in s, to stir during downtime. Must be shorter than downtime. Ignored on single experiments or
+                    # on the final experiment of a list
+    'stirBaud' : 9600, # Baud rate of Arduino controlling stir plate. Must be set in separate Arduino program.
+                        # do not touch this option if the set up is working
+                        # NOTE: this parameter should not change over the course of the experiment
     # saving parameters
     'save' : True,    # should the data be saved (as an sqlite3 database)
     'experimentFolder' : 'C://Users//shams//Documents//ecl temp//20251124 ru and ir test//', # folder to save in. Must end in //
