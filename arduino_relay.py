@@ -23,8 +23,10 @@ class Relay():
 
             if (command == "1") {
                 digitalWrite(13, HIGH);
+                Serial.println("1");
             } else if (command == "0") {
                 digitalWrite(13, LOW);
+                Serial.println("0");
             } else if (command == "PING") {
                 Serial.println("PONG");
             }
