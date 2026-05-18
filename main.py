@@ -94,8 +94,10 @@ experimentParameters = {
     'numberOfCycles' : 0, # number of times CA is repeated
 
     # downtime and stirring params
-    'downtime' : 10, # time, in s, to wait between experiments
+    'downtime' : 10, # minimum time, in s, to wait between experiments
     'downtimeStirQ' : False, # boolean, should the stir plate be turned on during downtime
+                             # NOTE: adding stirring adds 1-2s of communication overhead with the relay. This should be accounted
+                             #      for when designing experiments w/ tight timing i.e. 8s stir time results in a minimum of 10s downtime
     'stirTime' : 5, # time, in s, to stir during downtime. Must be shorter than downtime. Ignored on single experiments or
                     # on the final experiment of a list
     'stirBaud' : 9600, # Baud rate of Arduino controlling stir plate. Must be set in separate Arduino program.
