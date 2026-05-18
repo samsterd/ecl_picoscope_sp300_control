@@ -1,6 +1,7 @@
 import safe_exit as se
 import serial
 import serial.tools.list_ports
+import time
 
 class Relay():
     '''
@@ -20,9 +21,9 @@ class Relay():
             String command = Serial.readString();
             command.trim();
 
-            if (command == "RELAY_ON") {
+            if (command == "1") {
                 digitalWrite(13, HIGH);
-            } else if (command == "RELAY_OFF") {
+            } else if (command == "0") {
                 digitalWrite(13, LOW);
             } else if (command == "PING") {
                 Serial.println("PONG");
@@ -87,7 +88,7 @@ class Relay():
         If cmd is not a valid command, it is not sent and an warning message is printed
 
         Args:
-            cmd (str): string to send to the arduino. Valid options are "RELAY_ON", "RELAY_OFF", and "PING"
+            cmd (str): string to send to the arduino. Valid options are "1", "0", and "PING"
         Returns:
             None
         '''
@@ -108,13 +109,13 @@ class Relay():
         Returns:
             bool : is the command a recognized command for the Arduino relay
         '''
-        cmdList = ["RELAY_ON", "RELAY_OFF", "PING"]
+        cmdList = ["1", "0", "PING"]
 
         return cmd in cmdList
 
     def off(self):
         '''
-        Turns off relay by sending "RELAY_OFF" command
+        Turns off relay by sending "0" command
         This sets digital output pin 13 to low voltage
 
         Args:
@@ -123,12 +124,12 @@ class Relay():
             None
         '''
 
-        self.sendCommand("RELAY_OFF")
+        self.sendCommand("0")
 
 
     def on(self):
         '''
-        Turns on relay by sending "RELAY_ON" command
+        Turns on relay by sending "1" command
         This sets digital output pin 13 to high voltage
 
         Args:
@@ -137,7 +138,7 @@ class Relay():
             None
         '''
 
-        self.sendCommand("RELAY_ON")
+        self.sendCommand("1")
 
     def ping(self, printRes = False):
         '''
@@ -167,6 +168,7 @@ class Relay():
         '''
         try:
             self.off()
+            time.sleep(2) # requires a ~2s sleep to make sure the command is sent before cutting off the serial connection
             self.arduinoSerial.close()
         except serial.serialutil.PortNotOpenError:
             print("Relay serial connection already closed")
