@@ -63,7 +63,7 @@ class Relay():
         if self.port == None:
             raise RuntimeError("Relay error: unable to find an arduino plugged into a USB port.")
 
-        self.arduinoSerial = serial.Serial(self.port, baud, timeout = 1)
+        self.arduinoSerial = serial.Serial(self.port, baud, timeout = 3)
         se.register(self.disconnect)
         self.off()
 
@@ -175,9 +175,3 @@ class Relay():
             self.arduinoSerial.close()
         except serial.serialutil.PortNotOpenError:
             print("Relay serial connection already closed")
-
-relay = Relay(9600)
-time.sleep(1)
-relay.on()
-relay.off()
-relay.disconnect()
