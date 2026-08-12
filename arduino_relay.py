@@ -1,6 +1,7 @@
 import safe_exit as se
 import serial
 import serial.tools.list_ports
+import time
 
 class Relay():
     '''
@@ -20,10 +21,12 @@ class Relay():
             String command = Serial.readString();
             command.trim();
 
-            if (command == "RELAY_ON") {
+            if (command == "1") {
                 digitalWrite(13, HIGH);
-            } else if (command == "RELAY_OFF") {
+                Serial.println("1");
+            } else if (command == "0") {
                 digitalWrite(13, LOW);
+                Serial.println("0");
             } else if (command == "PING") {
                 Serial.println("PONG");
             }
@@ -34,6 +37,7 @@ class Relay():
         init: finds port, establishes connection, sets relay to off and registers the safe_exit condition
         findPort: identifies the USB port the Arduino is plugged into
         sendCommand: sends a command string to the arduino
+            NOTE: waiting for a response has a ~1s overhead which should be accounted for in break times
         validCommandQ: checks if an input command string is valid
         on: switches the relay on (USB disabled)
         off: switches the relay off (USB enabled)
@@ -59,7 +63,7 @@ class Relay():
         if self.port == None:
             raise RuntimeError("Relay error: unable to find an arduino plugged into a USB port.")
 
-        self.arduinoSerial = serial.Serial(self.port, baud, timeout = 1)
+        self.arduinoSerial = serial.Serial(self.port, baud, timeout = 3)
         se.register(self.disconnect)
         self.off()
 
@@ -81,21 +85,24 @@ class Relay():
 
     def sendCommand(self, cmd):
         '''
-        Sends specified command to the arduino. Since reading the text response requires ~1s of overhead, this is not performed
-        in general and is instead handled by the 'PING' command.
+        Sends specified command to the arduino and reads the reply.
+         Reading the reply adds ~1s of overhead time but ensures that the command was received.
 
         If cmd is not a valid command, it is not sent and an warning message is printed
 
         Args:
-            cmd (str): string to send to the arduino. Valid options are "RELAY_ON", "RELAY_OFF", and "PING"
+            cmd (str): string to send to the arduino. Valid options are "1", "0", and "PING"
         Returns:
             None
         '''
         if self.validCommandQ(cmd):
             self.arduinoSerial.write((cmd + '\n').encode())
+            res = self.arduinoSerial.readline().decode().strip()
+            return res
         else:
             print("arduino_relay Warning: specified command '" + str(cmd) + "' is not a valid command for the "
                                                                             "arduino relay. Command ignored.")
+            return None
 
     @staticmethod
     def validCommandQ(cmd : str):
@@ -108,13 +115,13 @@ class Relay():
         Returns:
             bool : is the command a recognized command for the Arduino relay
         '''
-        cmdList = ["RELAY_ON", "RELAY_OFF", "PING"]
+        cmdList = ["1", "0", "PING"]
 
         return cmd in cmdList
 
     def off(self):
         '''
-        Turns off relay by sending "RELAY_OFF" command
+        Turns off relay by sending "0" command
         This sets digital output pin 13 to low voltage
 
         Args:
@@ -123,12 +130,12 @@ class Relay():
             None
         '''
 
-        self.sendCommand("RELAY_OFF")
+        self.sendCommand("0")
 
 
     def on(self):
         '''
-        Turns on relay by sending "RELAY_ON" command
+        Turns on relay by sending "1" command
         This sets digital output pin 13 to high voltage
 
         Args:
@@ -137,12 +144,12 @@ class Relay():
             None
         '''
 
-        self.sendCommand("RELAY_ON")
+        self.sendCommand("1")
 
     def ping(self, printRes = False):
         '''
         Sends a PING command, then optionally prints the response and returns the string.
-        This is used primarily for debugging
+        This is used primarily for debugging.
 
         Args:
             None
@@ -150,9 +157,7 @@ class Relay():
             str : response from Arduino
         '''
 
-        self.sendCommand("PING")
-
-        res = self.arduinoSerial.readline().decode().strip()
+        res = self.sendCommand("PING")
 
         if printRes:
             print("Pinged Arduino relay.\nResponse: " + str(res))
