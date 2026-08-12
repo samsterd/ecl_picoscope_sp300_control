@@ -1439,3 +1439,37 @@ def randomStepProfile(times, numSteps = 10, voltageMin = 0, voltageMax = 1, dela
         return output
     else:
         return output
+
+def linearSweep(times, freq : float, start : float, peak : float, delayQ : bool = True):
+    '''
+    Returns a linear sweep voltage profile similar to a cyclic voltammetry experiment
+    Voltage begin at start, increases (decreases) linearly to peak, then decreases (increases) back to start.
+    Freq is used instead of sweep rate so that awgPeriod can be set to None for convenience. Note that this parameter is
+        ignored in this function - the sweep is calculated purely based on the input times and frequency is only
+        kept as a kwarg for easy calculation of awgPeriod
+
+    Args:
+        times (array) : input time array
+        freq (float) : frequency to complete one sweep. Ignored by the function but used by picoscope functions
+        start (float) : starting voltage
+        peak (float) : midpoint maximum or minimum voltage
+        delayQ (bool) : sets first and last values to 0 if True to avoid ending on a nonzero voltage
+    Returns:
+        array : voltages for output by the AWG
+    '''
+    numPoints = len(times)
+
+    # find how many points are for the forward vs backward sweep
+    # this should handle both even and odd numbers of points. If the numbers differ by one it should not matter too much
+    fwdSweepNumPoints = math.floor(numPoints / 2)
+    backSweepNumPoints = numPoints - fwdSweepNumPoints
+
+    fwdV = np.linspace(start, peak, fwdSweepNumPoints)
+    backV = np.linspace(peak, start, backSweepNumPoints)
+    sweep = np.concatenate((fwdV, backV))
+
+    if delayQ:
+        sweep[0] = 0
+        sweep[-1] = 0
+
+    return sweep
